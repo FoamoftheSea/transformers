@@ -442,6 +442,7 @@ _import_structure = {
     "models.mpt": ["MPT_PRETRAINED_CONFIG_ARCHIVE_MAP", "MptConfig"],
     "models.mra": ["MRA_PRETRAINED_CONFIG_ARCHIVE_MAP", "MraConfig"],
     "models.mt5": ["MT5Config"],
+    "models.multiformer": ["MultiformerConfig", "MultiformerModel", "Multiformer"],
     "models.musicgen": [
         "MUSICGEN_PRETRAINED_CONFIG_ARCHIVE_MAP",
         "MusicgenConfig",
@@ -964,6 +965,7 @@ else:
     _import_structure["models.mobilenet_v1"].extend(["MobileNetV1FeatureExtractor", "MobileNetV1ImageProcessor"])
     _import_structure["models.mobilenet_v2"].extend(["MobileNetV2FeatureExtractor", "MobileNetV2ImageProcessor"])
     _import_structure["models.mobilevit"].extend(["MobileViTFeatureExtractor", "MobileViTImageProcessor"])
+    _import_structure["models.multiformer"].extend(["MultiformerImageProcessor"])
     _import_structure["models.oneformer"].extend(["OneFormerImageProcessor"])
     _import_structure["models.owlvit"].extend(["OwlViTFeatureExtractor", "OwlViTImageProcessor"])
     _import_structure["models.perceiver"].extend(["PerceiverFeatureExtractor", "PerceiverImageProcessor"])
@@ -2294,6 +2296,11 @@ else:
             "MT5ForSequenceClassification",
             "MT5Model",
             "MT5PreTrainedModel",
+        ]
+    )
+    _import_structure["models.multiformer"].extend(
+        [
+            "MultiformerImageProcessor"
         ]
     )
     _import_structure["models.musicgen"].extend(
@@ -4524,6 +4531,7 @@ if TYPE_CHECKING:
     from .models.mpt import MPT_PRETRAINED_CONFIG_ARCHIVE_MAP, MptConfig
     from .models.mra import MRA_PRETRAINED_CONFIG_ARCHIVE_MAP, MraConfig
     from .models.mt5 import MT5Config
+    from .models.multiformer import MultiformerConfig
     from .models.musicgen import (
         MUSICGEN_PRETRAINED_CONFIG_ARCHIVE_MAP,
         MusicgenConfig,
@@ -4988,6 +4996,7 @@ if TYPE_CHECKING:
         from .models.mobilenet_v1 import MobileNetV1FeatureExtractor, MobileNetV1ImageProcessor
         from .models.mobilenet_v2 import MobileNetV2FeatureExtractor, MobileNetV2ImageProcessor
         from .models.mobilevit import MobileViTFeatureExtractor, MobileViTImageProcessor
+        from .models.multiformer import MultiformerImageProcessor
         from .models.oneformer import OneFormerImageProcessor
         from .models.owlvit import OwlViTFeatureExtractor, OwlViTImageProcessor
         from .models.perceiver import PerceiverFeatureExtractor, PerceiverImageProcessor
@@ -6091,6 +6100,10 @@ if TYPE_CHECKING:
             MT5ForSequenceClassification,
             MT5Model,
             MT5PreTrainedModel,
+        )
+        from .models.multiformer import (
+            MultiformerModel,
+            Multiformer,
         )
         from .models.musicgen import (
             MUSICGEN_PRETRAINED_MODEL_ARCHIVE_LIST,
