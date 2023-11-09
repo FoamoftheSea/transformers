@@ -145,6 +145,7 @@ from . import (
     mpt,
     mra,
     mt5,
+    multiformer,
     musicgen,
     mvp,
     nat,
