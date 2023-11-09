@@ -430,7 +430,15 @@ class DeformableDetrConvEncoder(nn.Module):
     # Copied from transformers.models.detr.modeling_detr.DetrConvEncoder.forward with Detr->DeformableDetr
     def forward(self, pixel_values: torch.Tensor, pixel_mask: torch.Tensor):
         # send pixel_values through the model to get list of feature maps
-        features = self.model(pixel_values) if self.config.use_timm_backbone else self.model(pixel_values).feature_maps
+        outputs = self.model(pixel_values)
+        if self.config.use_timm_backbone:
+            features = outputs
+        elif hasattr(outputs, "hidden_states"):
+            features = outputs.hidden_states
+        elif hasattr(outputs, "feature_maps"):
+            features = outputs.feature_maps
+        else:
+            raise AttributeError("Backbone model output must contain one of ('hidden_states', 'feature_maps').")
 
         out = []
         for feature_map in features:
@@ -1993,7 +2001,7 @@ class DeformableDetrForObjectDetection(DeformableDetrPreTrainedModel):
             losses = ["labels", "boxes", "cardinality"]
             criterion = DeformableDetrLoss(
                 matcher=matcher,
-                num_classes=self.config.num_labels,
+                num_classes=self.config.num_labels - 1,
                 focal_alpha=self.config.focal_alpha,
                 losses=losses,
             )

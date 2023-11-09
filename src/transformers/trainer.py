@@ -3195,13 +3195,18 @@ class Trainer:
             self.control = self.callback_handler.on_prediction_step(args, self.state, self.control)
 
             if self.args.compute_metrics_interval == "batch":
+                is_last_batch = step == len(dataloader) - 1
                 if self.compute_metrics is not None and preds_host is not None and labels_host is not None:
                     if args.include_inputs_for_metrics:
                         metrics = self.compute_metrics(
-                            EvalPrediction(predictions=preds_host, label_ids=labels_host, inputs=inputs_host)
+                            EvalPrediction(predictions=preds_host, label_ids=labels_host, inputs=inputs_host),
+                            calculate_result=is_last_batch,
                         )
                     else:
-                        metrics = self.compute_metrics(EvalPrediction(predictions=preds_host, label_ids=labels_host))
+                        metrics = self.compute_metrics(
+                            EvalPrediction(predictions=preds_host, label_ids=labels_host),
+                            calculate_result=is_last_batch,
+                        )
                 losses_host, preds_host, inputs_host, labels_host = None, None, None, None
 
             elif (
