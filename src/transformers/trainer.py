@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Un
 from .integrations import (
     get_reporting_integration_callbacks,
     hp_params,
+    is_fairscale_available,
 )
 
 # isort: on
@@ -57,13 +58,14 @@ from . import __version__
 from .configuration_utils import PretrainedConfig
 from .data.data_collator import DataCollator, DataCollatorWithPadding, default_data_collator
 from .debug_utils import DebugOption, DebugUnderflowOverflow
+from .dependency_versions_check import dep_version_check
 from .hyperparameter_search import ALL_HYPERPARAMETER_SEARCH_BACKENDS, default_hp_search_backend
-from .integrations.deepspeed import deepspeed_init, deepspeed_load_checkpoint, is_deepspeed_available
+from .integrations.deepspeed import deepspeed_init, deepspeed_load_checkpoint
 from .modelcard import TrainingSummary
 from .modeling_utils import PreTrainedModel, load_sharded_checkpoint, unwrap_model
 from .models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES, MODEL_MAPPING_NAMES
 from .optimization import Adafactor, get_scheduler
-from .pytorch_utils import ALL_LAYERNORM_LAYERS, is_torch_less_than_1_11
+from .pytorch_utils import ALL_LAYERNORM_LAYERS
 from .tokenization_utils_base import PreTrainedTokenizerBase
 from .trainer_callback import (
     CallbackHandler,
@@ -83,7 +85,6 @@ from .trainer_pt_utils import (
     distributed_broadcast_scalars,
     distributed_concat,
     find_batch_size,
-    get_dataloader_sampler,
     get_model_param_count,
     get_module_class_from_name,
     get_parameter_names,
@@ -92,7 +93,6 @@ from .trainer_pt_utils import (
     nested_numpify,
     nested_xla_mesh_reduce,
     reissue_pt_warnings,
-    remove_dummy_checkpoint,
 )
 from .trainer_utils import (
     PREFIX_CHECKPOINT_DIR,
@@ -105,6 +105,7 @@ from .trainer_utils import (
     IntervalStrategy,
     PredictionOutput,
     RemoveColumnsCollator,
+    ShardedDDPOption,
     TrainerMemoryTracker,
     TrainOutput,
     default_compute_objective,
@@ -113,7 +114,6 @@ from .trainer_utils import (
     find_executable_batch_size,
     get_last_checkpoint,
     has_length,
-    neftune_post_forward_hook,
     number_of_arguments,
     seed_worker,
     set_seed,
@@ -144,7 +144,6 @@ from .utils import (
     is_sagemaker_mp_enabled,
     is_torch_compile_available,
     is_torch_neuroncore_available,
-    is_torch_npu_available,
     is_torch_tpu_available,
     logging,
     strtobool,
@@ -169,6 +168,15 @@ if is_datasets_available():
 if is_torch_tpu_available(check_device=False):
     import torch_xla.core.xla_model as xm
     import torch_xla.debug.metrics as met
+
+if is_fairscale_available():
+    dep_version_check("fairscale")
+    import fairscale
+    from fairscale.nn.data_parallel import FullyShardedDataParallel as FullyShardedDDP
+    from fairscale.nn.data_parallel import ShardedDataParallel as ShardedDDP
+    from fairscale.nn.wrap import auto_wrap
+    from fairscale.optim import OSS
+    from fairscale.optim.grad_scaler import ShardedGradScaler
 
 
 if is_sagemaker_mp_enabled():
@@ -202,19 +210,10 @@ if is_accelerate_available():
             save_fsdp_model,
             save_fsdp_optimizer,
         )
-    DATA_SAMPLERS = [RandomSampler]
-    if version.parse(accelerate_version) > version.parse("0.23.0"):
-        from accelerate.data_loader import SeedableRandomSampler
-
-        DATA_SAMPLERS += [SeedableRandomSampler]
-
-    if is_deepspeed_available():
-        from accelerate.utils import DeepSpeedSchedulerWrapper
 
 
 if TYPE_CHECKING:
     import optuna
-
 
 logger = logging.get_logger(__name__)
 
@@ -223,7 +222,6 @@ logger = logging.get_logger(__name__)
 TRAINING_ARGS_NAME = "training_args.bin"
 TRAINER_STATE_NAME = "trainer_state.json"
 OPTIMIZER_NAME = "optimizer.pt"
-OPTIMIZER_NAME_BIN = "optimizer.bin"
 SCHEDULER_NAME = "scheduler.pt"
 SCALER_NAME = "scaler.pt"
 
@@ -327,6 +325,7 @@ class Trainer:
         callbacks: Optional[List[TrainerCallback]] = None,
         optimizers: Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR] = (None, None),
         preprocess_logits_for_metrics: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
+        compute_metrics_interval: str = "full",
     ):
         if args is None:
             output_dir = "tmp_trainer"
@@ -3200,6 +3199,7 @@ class Trainer:
         all_inputs = None
         # Will be useful when we have an iterable dataset so don't know its length.
 
+        metrics = None
         observed_num_examples = 0
         # Main evaluation loop
         for step, inputs in enumerate(dataloader):
@@ -3221,13 +3221,13 @@ class Trainer:
 
             # Update containers on host
             if loss is not None:
-                losses = self.gather_function((loss.repeat(batch_size)))
+                losses = self.accelerator.gather_for_metrics((loss.repeat(batch_size)))
                 losses_host = losses if losses_host is None else nested_concat(losses_host, losses, padding_index=-100)
             if labels is not None:
                 labels = self.accelerator.pad_across_processes(labels, dim=1, pad_index=-100)
             if inputs_decode is not None:
                 inputs_decode = self.accelerator.pad_across_processes(inputs_decode, dim=1, pad_index=-100)
-                inputs_decode = self.gather_function((inputs_decode))
+                inputs_decode = self.accelerator.gather_for_metrics((inputs_decode))
                 inputs_host = (
                     inputs_decode
                     if inputs_host is None
@@ -3246,9 +3246,24 @@ class Trainer:
 
             self.control = self.callback_handler.on_prediction_step(args, self.state, self.control)
 
-            # Gather all tensors and put them back on the CPU if we have done enough accumulation steps.
-            if (
-                args.eval_accumulation_steps is not None
+            if self.args.compute_metrics_interval == "batch":
+                is_last_batch = step == len(dataloader) - 1
+                if self.compute_metrics is not None and preds_host is not None and labels_host is not None:
+                    if args.include_inputs_for_metrics:
+                        metrics = self.compute_metrics(
+                            EvalPrediction(predictions=preds_host, label_ids=labels_host, inputs=inputs_host),
+                            calculate_result=is_last_batch,
+                        )
+                    else:
+                        metrics = self.compute_metrics(
+                            EvalPrediction(predictions=preds_host, label_ids=labels_host),
+                            calculate_result=is_last_batch,
+                        )
+                losses_host, preds_host, inputs_host, labels_host = None, None, None, None
+
+            elif (
+                self.args.compute_metrics_interval == "full"
+                and args.eval_accumulation_steps is not None
                 and (step + 1) % args.eval_accumulation_steps == 0
                 and (self.accelerator.sync_gradients or version.parse(accelerate_version) > version.parse("0.20.3"))
             ):
@@ -3319,7 +3334,7 @@ class Trainer:
                 )
             else:
                 metrics = self.compute_metrics(EvalPrediction(predictions=all_preds, label_ids=all_labels))
-        else:
+        elif metrics is None:
             metrics = {}
 
         # To be JSON-serializable, we need to remove numpy types or zero-d tensors
