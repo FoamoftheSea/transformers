@@ -116,7 +116,7 @@ class MultiformerMetric:
 
     def reset_metrics(self):
         self.metrics = {
-            "det_2d": MeanAveragePrecision(),
+            "det_2d": MeanAveragePrecision(max_detection_thresholds=[3, 30, 300]),
             "semseg": MultiformerSemanticEvalMetric(
                 id2label=self.id2label,
                 ignore_class_ids=self.ignore_class_ids,
@@ -129,13 +129,12 @@ class MultiformerMetric:
         if task == MultiformerTask.DET_2D:
             preds = []
             for i in range(eval_pred.predictions["logits"].shape[0]):
-                prediction_scores = eval_pred.predictions["logits"][i].max(1)
-                predicted_labels = eval_pred.predictions["logits"][i].argmax(1)
+                prediction_scores = torch.softmax(torch.FloatTensor(eval_pred.predictions["logits"][i]), dim=-1).max(1)
                 preds.append(
                     {
                         "boxes": torch.FloatTensor(eval_pred.predictions["pred_boxes"][i]),
-                        "scores": torch.FloatTensor(prediction_scores),
-                        "labels": torch.LongTensor(predicted_labels),
+                        "scores": prediction_scores[0],
+                        "labels": torch.LongTensor(prediction_scores[1]),
                         # "masks": None,
                     }
                 )
