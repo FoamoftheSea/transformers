@@ -28,6 +28,7 @@ from torch.autograd import Function
 from torch.autograd.function import once_differentiable
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss
 
+from transformers.models.deformable_detr.load_custom import load_cuda_kernels
 from ..glpn.modeling_glpn import GLPNDecoder, GLPNDepthEstimationHead, GLPNDecoderStage
 from ..segformer.modeling_segformer import SegformerMLP
 from ... import SegformerDecodeHead
@@ -49,7 +50,7 @@ from ...pytorch_utils import meshgrid
 from ...utils import is_ninja_available, logging
 from ..auto import AutoBackbone
 from .configuration_multiformer import MultiformerConfig
-from .load_custom import load_cuda_kernels
+# from .load_custom import load_cuda_kernels
 
 
 logger = logging.get_logger(__name__)
