@@ -37,7 +37,7 @@ except OptionalDependencyNotAvailable:
     pass
 else:
     _import_structure["modeling_multiformer"] = [
-        "DEFORMABLE_DETR_PRETRAINED_MODEL_ARCHIVE_LIST",
+        "MULTIFORMER_PRETRAINED_MODEL_ARCHIVE_LIST",
         "Multiformer",
         "MultiformerModel",
         # "DeformableDetrPreTrainedModel",
@@ -45,7 +45,7 @@ else:
 
 
 if TYPE_CHECKING:
-    from .configuration_multiformer import DEFORMABLE_DETR_PRETRAINED_CONFIG_ARCHIVE_MAP, MultiformerConfig
+    from .configuration_multiformer import MULTIFORMER_PRETRAINED_CONFIG_ARCHIVE_MAP, MultiformerConfig
 
     try:
         if not is_vision_available():

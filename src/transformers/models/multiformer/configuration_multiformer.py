@@ -21,8 +21,8 @@ from ..auto import CONFIG_MAPPING
 
 logger = logging.get_logger(__name__)
 
-DEFORMABLE_DETR_PRETRAINED_CONFIG_ARCHIVE_MAP = {
-    "SenseTime/deformable-detr": "https://huggingface.co/sensetime/deformable-detr/resolve/main/config.json",
+MULTIFORMER_PRETRAINED_CONFIG_ARCHIVE_MAP = {
+    "FoamoftheSea/multiformer-b0": "https://huggingface.co/foamofthesea/multiformer/resolve/main/config.json",
     # See all Deformable DETR models at https://huggingface.co/models?filter=deformable-detr
 }
 
