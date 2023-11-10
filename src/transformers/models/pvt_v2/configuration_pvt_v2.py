@@ -172,12 +172,12 @@ class PvtV2Config(PretrainedConfig):
         self.initializer_range = initializer_range
         self.drop_path_rate = drop_path_rate
         self.layer_norm_eps = layer_norm_eps
-        self.num_labels = num_labels
+        self.num_labels = num_labels if self.id2label is None else len(self.id2label)
         self.qkv_bias = qkv_bias
         self.attn_reduce = attn_reduce
         self.stage_names = ["stem"] + [f"stage{idx}" for idx in range(1, len(depths) + 1)]
         self.reshape_last_stage = kwargs.get("reshape_last_stage", True)
-        self._out_features, self._out_indices = get_aligned_output_features_output_indices(
+        self._out_features, self.out_indices = get_aligned_output_features_output_indices(
             out_features=out_features, out_indices=out_indices, stage_names=self.stage_names
         )
 

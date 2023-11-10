@@ -1522,7 +1522,7 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
         # Create input projection layers
         if config.num_feature_levels > 1:
             num_backbone_outs = len(backbone.intermediate_channel_sizes)
-            start_idx = 1 if 0 in config.backbone_config._out_indices else 0
+            start_idx = 1 if 0 in config.backbone_config.out_indices else 0
             input_proj_list = []
             for i in range(start_idx, num_backbone_outs):
                 in_channels = backbone.intermediate_channel_sizes[i]
@@ -1718,7 +1718,7 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
         # Then, apply 1x1 convolution to reduce the channel dimension to d_model (256 by default)
         sources = []
         masks = []
-        start_idx = 1 if 0 in self.config.backbone_config._out_indices else 0
+        start_idx = 1 if 0 in self.config.backbone_config.out_indices else 0
         position_embeddings_list = position_embeddings_list[start_idx:]
         for level, (source, mask) in enumerate(features[start_idx:]):
             sources.append(self.input_proj[level](source))
@@ -2143,7 +2143,7 @@ class Multiformer(DeformableDetrPreTrainedModel):
             losses = ["labels", "boxes", "cardinality"]
             criterion = DeformableDetrLoss(
                 matcher=matcher,
-                num_classes=self.config.num_labels - 1,
+                num_classes=self.config.num_labels,
                 focal_alpha=self.config.focal_alpha,
                 losses=losses,
             )

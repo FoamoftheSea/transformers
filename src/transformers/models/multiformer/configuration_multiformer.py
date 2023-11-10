@@ -22,7 +22,7 @@ from ..auto import CONFIG_MAPPING
 logger = logging.get_logger(__name__)
 
 MULTIFORMER_PRETRAINED_CONFIG_ARCHIVE_MAP = {
-    "FoamoftheSea/multiformer-b0": "https://huggingface.co/foamofthesea/multiformer/resolve/main/config.json",
+    "FoamoftheSea/multiformer-b0": "https://huggingface.co/foamofthesea/multiformer/blob/main/config.json",
     # See all Deformable DETR models at https://huggingface.co/models?filter=deformable-detr
 }
 
