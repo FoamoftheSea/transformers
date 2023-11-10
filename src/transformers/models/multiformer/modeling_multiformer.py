@@ -1896,7 +1896,7 @@ class MultiformerSegmentationHead(SegformerDecodeHead):
         self.dropout = nn.Dropout(config.semantic_classifier_dropout)
         self.classifier = nn.Conv2d(config.semantic_decoder_dim, config.backbone_config.num_labels, kernel_size=1)
 
-        self.config = config
+        self.config = config.backbone_config
 
 
 class MultiformerDepthDecoder(GLPNDecoder):
