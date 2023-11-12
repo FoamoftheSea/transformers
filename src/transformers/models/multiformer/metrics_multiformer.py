@@ -6,6 +6,7 @@ import torch
 from torchmetrics.detection import MeanAveragePrecision
 
 from transformers import EvalPrediction
+from transformers.models.multiformer.image_processing_multiformer import post_process_object_detection
 from transformers.models.multiformer.modeling_multiformer import MultiformerTask, IRMSELoss, SiLogLoss
 
 
@@ -107,16 +108,18 @@ class MultiformerMetric:
         id2label: Optional[Dict[int, str]] = None,
         ignore_class_ids: Optional[Set[int]] = None,
         reduced_labels: bool = False,
+        box_score_threshold: float = 0.35,
     ):
         self.id2label = id2label
         self.ignore_class_ids = ignore_class_ids
         self.reduced_labels = reduced_labels
+        self.box_score_threshold = box_score_threshold
         self.metrics = {}
         self.reset_metrics()
 
     def reset_metrics(self):
         self.metrics = {
-            "det_2d": MeanAveragePrecision(max_detection_thresholds=[3, 30, 300]),
+            "det_2d": MeanAveragePrecision(),
             "semseg": MultiformerSemanticEvalMetric(
                 id2label=self.id2label,
                 ignore_class_ids=self.ignore_class_ids,
@@ -127,21 +130,21 @@ class MultiformerMetric:
 
     def convert_eval_pred(self, eval_pred, task):
         if task == MultiformerTask.DET_2D:
-            preds = []
-            for i in range(eval_pred.predictions["logits"].shape[0]):
-                prediction_scores = torch.softmax(torch.FloatTensor(eval_pred.predictions["logits"][i]), dim=-1).max(1)
-                preds.append(
-                    {
-                        "boxes": torch.FloatTensor(eval_pred.predictions["pred_boxes"][i]),
-                        "scores": prediction_scores[0],
-                        "labels": torch.LongTensor(prediction_scores[1]),
-                        # "masks": None,
-                    }
-                )
+            target_sizes = [eval_pred.inputs[i, 0].shape for i in range(eval_pred.inputs.shape[0])]
+            preds = post_process_object_detection(
+                eval_pred.predictions,
+                threshold=self.box_score_threshold,
+                target_sizes=target_sizes
+            )
 
             target = [
                 {
-                    "boxes": torch.FloatTensor(eval_pred.label_ids["labels"][i]["boxes"]),
+                    "boxes": post_process_object_detection(
+                        eval_pred.label_ids["labels"][i]["boxes"][None, ...],
+                        threshold=self.box_score_threshold,
+                        target_sizes=[target_sizes[i]],
+                        boxes_only=True,
+                    )[0]["boxes"],
                     "labels": torch.LongTensor(eval_pred.label_ids["labels"][i]["class_labels"]),
                     # "masks": None,
                     # "iscrowd": None,
