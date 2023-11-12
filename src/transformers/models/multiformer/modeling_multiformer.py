@@ -2398,7 +2398,7 @@ class DeformableDetrLoss(nn.Module):
 
     @torch.no_grad()
     # Copied from transformers.models.detr.modeling_detr.DetrLoss.loss_cardinality
-    def loss_cardinality(self, outputs, targets, indices, num_boxes):
+    def loss_cardinality(self, outputs, targets, indices, num_boxes, threshold=0.35):
         """
         Compute the cardinality error, i.e. the absolute error in the number of predicted non-empty boxes.
 
@@ -2408,7 +2408,7 @@ class DeformableDetrLoss(nn.Module):
         device = logits.device
         target_lengths = torch.as_tensor([len(v["class_labels"]) for v in targets], device=device)
         # Count the number of predictions that are NOT "no-object" (which is the last class)
-        card_pred = (logits.argmax(-1) != logits.shape[-1] - 1).sum(1)
+        card_pred = (logits.sigmoid().max(-1)[0] >= threshold).sum(1)
         card_err = nn.functional.l1_loss(card_pred.float(), target_lengths.float())
         losses = {"cardinality_error": card_err}
         return losses
