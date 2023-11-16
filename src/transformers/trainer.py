@@ -40,7 +40,6 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Un
 from .integrations import (
     get_reporting_integration_callbacks,
     hp_params,
-    is_fairscale_available,
 )
 
 # isort: on
@@ -58,14 +57,13 @@ from . import __version__
 from .configuration_utils import PretrainedConfig
 from .data.data_collator import DataCollator, DataCollatorWithPadding, default_data_collator
 from .debug_utils import DebugOption, DebugUnderflowOverflow
-from .dependency_versions_check import dep_version_check
 from .hyperparameter_search import ALL_HYPERPARAMETER_SEARCH_BACKENDS, default_hp_search_backend
-from .integrations.deepspeed import deepspeed_init, deepspeed_load_checkpoint
+from .integrations.deepspeed import deepspeed_init, deepspeed_load_checkpoint, is_deepspeed_available
 from .modelcard import TrainingSummary
 from .modeling_utils import PreTrainedModel, load_sharded_checkpoint, unwrap_model
 from .models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES, MODEL_MAPPING_NAMES
 from .optimization import Adafactor, get_scheduler
-from .pytorch_utils import ALL_LAYERNORM_LAYERS
+from .pytorch_utils import ALL_LAYERNORM_LAYERS, is_torch_less_than_1_11
 from .tokenization_utils_base import PreTrainedTokenizerBase
 from .trainer_callback import (
     CallbackHandler,
@@ -85,6 +83,7 @@ from .trainer_pt_utils import (
     distributed_broadcast_scalars,
     distributed_concat,
     find_batch_size,
+    get_dataloader_sampler,
     get_model_param_count,
     get_module_class_from_name,
     get_parameter_names,
@@ -93,6 +92,7 @@ from .trainer_pt_utils import (
     nested_numpify,
     nested_xla_mesh_reduce,
     reissue_pt_warnings,
+    remove_dummy_checkpoint,
 )
 from .trainer_utils import (
     PREFIX_CHECKPOINT_DIR,
@@ -105,7 +105,6 @@ from .trainer_utils import (
     IntervalStrategy,
     PredictionOutput,
     RemoveColumnsCollator,
-    ShardedDDPOption,
     TrainerMemoryTracker,
     TrainOutput,
     default_compute_objective,
@@ -114,6 +113,7 @@ from .trainer_utils import (
     find_executable_batch_size,
     get_last_checkpoint,
     has_length,
+    neftune_post_forward_hook,
     number_of_arguments,
     seed_worker,
     set_seed,
@@ -144,6 +144,7 @@ from .utils import (
     is_sagemaker_mp_enabled,
     is_torch_compile_available,
     is_torch_neuroncore_available,
+    is_torch_npu_available,
     is_torch_tpu_available,
     logging,
     strtobool,
@@ -168,15 +169,6 @@ if is_datasets_available():
 if is_torch_tpu_available(check_device=False):
     import torch_xla.core.xla_model as xm
     import torch_xla.debug.metrics as met
-
-if is_fairscale_available():
-    dep_version_check("fairscale")
-    import fairscale
-    from fairscale.nn.data_parallel import FullyShardedDataParallel as FullyShardedDDP
-    from fairscale.nn.data_parallel import ShardedDataParallel as ShardedDDP
-    from fairscale.nn.wrap import auto_wrap
-    from fairscale.optim import OSS
-    from fairscale.optim.grad_scaler import ShardedGradScaler
 
 
 if is_sagemaker_mp_enabled():
@@ -210,10 +202,19 @@ if is_accelerate_available():
             save_fsdp_model,
             save_fsdp_optimizer,
         )
+    DATA_SAMPLERS = [RandomSampler]
+    if version.parse(accelerate_version) > version.parse("0.23.0"):
+        from accelerate.data_loader import SeedableRandomSampler
+
+        DATA_SAMPLERS += [SeedableRandomSampler]
+
+    if is_deepspeed_available():
+        from accelerate.utils import DeepSpeedSchedulerWrapper
 
 
 if TYPE_CHECKING:
     import optuna
+
 
 logger = logging.get_logger(__name__)
 
@@ -222,6 +223,7 @@ logger = logging.get_logger(__name__)
 TRAINING_ARGS_NAME = "training_args.bin"
 TRAINER_STATE_NAME = "trainer_state.json"
 OPTIMIZER_NAME = "optimizer.pt"
+OPTIMIZER_NAME_BIN = "optimizer.bin"
 SCHEDULER_NAME = "scheduler.pt"
 SCALER_NAME = "scaler.pt"
 
