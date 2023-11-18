@@ -1520,36 +1520,24 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
         self.backbone = DeformableDetrConvModel(backbone, position_embeddings)
 
         # Create input projection layers
-        if config.num_feature_levels > 1:
-            num_backbone_outs = len(backbone.intermediate_channel_sizes)
-            start_idx = 1 if 0 in config.backbone_config.out_indices else 0
-            input_proj_list = []
-            for i in range(start_idx, num_backbone_outs):
-                in_channels = backbone.intermediate_channel_sizes[i]
-                input_proj_list.append(
-                    nn.Sequential(
-                        nn.Conv2d(in_channels, config.d_model, kernel_size=1),
-                        nn.GroupNorm(32, config.d_model),
-                    )
+        input_proj_list = []
+        for i in config.det2d_input_feature_levels:
+            in_channels = backbone.intermediate_channel_sizes[i]
+            input_proj_list.append(
+                nn.Sequential(
+                    nn.Conv2d(in_channels, config.d_model, kernel_size=1),
+                    nn.GroupNorm(32, config.d_model),
                 )
-            for _ in range(config.num_feature_levels - (num_backbone_outs - start_idx)):
-                input_proj_list.append(
-                    nn.Sequential(
-                        nn.Conv2d(in_channels, config.d_model, kernel_size=3, stride=2, padding=1),
-                        nn.GroupNorm(32, config.d_model),
-                    )
-                )
-                in_channels = config.d_model
-            self.input_proj = nn.ModuleList(input_proj_list)
-        else:
-            self.input_proj = nn.ModuleList(
-                [
-                    nn.Sequential(
-                        nn.Conv2d(backbone.intermediate_channel_sizes[-1], config.d_model, kernel_size=1),
-                        nn.GroupNorm(32, config.d_model),
-                    )
-                ]
             )
+        for _ in range(config.det2d_extra_feature_levels):
+            input_proj_list.append(
+                nn.Sequential(
+                    nn.Conv2d(in_channels, config.d_model, kernel_size=3, stride=2, padding=1),
+                    nn.GroupNorm(32, config.d_model),
+                )
+            )
+            in_channels = config.d_model
+        self.input_proj = nn.ModuleList(input_proj_list)
 
         if not config.two_stage:
             self.query_position_embeddings = nn.Embedding(config.num_queries, config.d_model * 2)

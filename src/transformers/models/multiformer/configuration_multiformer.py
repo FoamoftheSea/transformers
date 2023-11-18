@@ -119,8 +119,10 @@ class MultiformerConfig(PretrainedConfig):
             Relative weight of the generalized IoU loss in the object detection loss.
         eos_coefficient (`float`, *optional*, defaults to 0.1):
             Relative classification weight of the 'no-object' class in the object detection loss.
-        num_feature_levels (`int`, *optional*, defaults to 4):
-            The number of input feature levels.
+        det2d_input_feature_levels (`List[int]`, *optional*, defaults to [-1]):
+            The indices of backbone feature levels to use for deformable DETR.
+        det2d_extra_feature_levels (`int`, *optional*, defaults to 1):
+            The number of extra feature levels to create from the deepest backbone level used.
         encoder_n_points (`int`, *optional*, defaults to 4):
             The number of sampled keys in each feature level for each attention head in the encoder.
         decoder_n_points (`int`, *optional*, defaults to 4):
@@ -198,7 +200,8 @@ class MultiformerConfig(PretrainedConfig):
         backbone="resnet50",
         use_pretrained_backbone=True,
         dilation=False,
-        num_feature_levels=4,
+        det2d_input_feature_levels=None,
+        det2d_extra_feature_levels=1,
         encoder_n_points=4,
         decoder_n_points=4,
         two_stage=False,
@@ -230,6 +233,16 @@ class MultiformerConfig(PretrainedConfig):
                 backbone_model_type = backbone_config.get("model_type")
                 config_class = CONFIG_MAPPING[backbone_model_type]
                 backbone_config = config_class.from_dict(backbone_config)
+
+        if not all([idx < len(backbone_config.out_indices) for idx in det2d_input_feature_levels]):
+            raise ValueError(
+                "All det2d_input_feature_levels must correspond to backbone output layers, re-indexed at zero. \n" +
+                "Example: if backbone_config.out_indices == [1, 3, 4], these become [0, 1, 2] as det2d input levels."
+            )
+
+        if det2d_input_feature_levels is None:
+            det2d_input_feature_levels = [i for i in range(len(backbone_config.out_indices))]
+        self.num_feature_levels = len(det2d_input_feature_levels) + det2d_extra_feature_levels
         self.use_timm_backbone = use_timm_backbone
         self.backbone_config = backbone_config
         self.num_channels = num_channels
@@ -262,7 +275,8 @@ class MultiformerConfig(PretrainedConfig):
         self.use_pretrained_backbone = use_pretrained_backbone
         self.dilation = dilation
         # deformable attributes
-        self.num_feature_levels = num_feature_levels
+        self.det2d_input_feature_levels = det2d_input_feature_levels
+        self.det2d_extra_feature_levels = det2d_extra_feature_levels
         self.encoder_n_points = encoder_n_points
         self.decoder_n_points = decoder_n_points
         self.two_stage = two_stage
