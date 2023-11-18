@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """ Deformable DETR model configuration"""
-
+from ... import PvtV2Config
 from ...configuration_utils import PretrainedConfig
 from ...utils import logging
 from ..auto import CONFIG_MAPPING
@@ -169,8 +169,11 @@ class MultiformerConfig(PretrainedConfig):
 
     def __init__(
         self,
-        use_timm_backbone=True,
-        backbone_config=None,
+        use_timm_backbone=False,
+        backbone_config=PvtV2Config(
+            mlp_ratios=[4, 4, 4, 4],
+            out_indices=[0, 1, 2, 3],
+        ),
         num_channels=3,
         semantic_decoder_dim=256,
         semantic_classifier_dropout=0.1,
@@ -234,14 +237,15 @@ class MultiformerConfig(PretrainedConfig):
                 config_class = CONFIG_MAPPING[backbone_model_type]
                 backbone_config = config_class.from_dict(backbone_config)
 
+        if det2d_input_feature_levels is None:
+            det2d_input_feature_levels = [i for i in range(len(backbone_config.out_indices))]
+
         if not all([idx < len(backbone_config.out_indices) for idx in det2d_input_feature_levels]):
             raise ValueError(
                 "All det2d_input_feature_levels must correspond to backbone output layers, re-indexed at zero. \n" +
                 "Example: if backbone_config.out_indices == [1, 3, 4], these become [0, 1, 2] as det2d input levels."
             )
 
-        if det2d_input_feature_levels is None:
-            det2d_input_feature_levels = [i for i in range(len(backbone_config.out_indices))]
         self.num_feature_levels = len(det2d_input_feature_levels) + det2d_extra_feature_levels
         self.use_timm_backbone = use_timm_backbone
         self.backbone_config = backbone_config
