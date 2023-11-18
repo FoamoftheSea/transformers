@@ -21,7 +21,6 @@ from collections import OrderedDict
 from typing import Callable, Dict, List, Mapping, Sequence, Union
 
 from packaging import version
-from torch.nn.modules.utils import _ntuple
 
 from ...configuration_utils import PretrainedConfig
 from ...onnx import OnnxConfig
@@ -97,7 +96,7 @@ class PvtV2Config(PretrainedConfig, BackboneConfigMixin):
             If used as backbone, list of features to output. Can be any of `"stem"`, `"stage1"`, `"stage2"`, etc.
             (depending on how many stages the model has). If unset and `out_indices` is set, will default to the
             corresponding stages. If unset and `out_indices` is unset, will default to the last stage.
-        out_indices (`List[int]`, *optional*, defaults to `[1, 2, 3]`):
+        out_indices (`List[int]`, *optional*):
             If used as backbone, list of indices of features to output. Can be any of 0, 1, 2, etc. (depending on how
             many stages the model has). If unset and `out_features` is set, will default to the corresponding stages.
             If unset and `out_features` is unset, will default to the last stage.
@@ -115,6 +114,7 @@ class PvtV2Config(PretrainedConfig, BackboneConfigMixin):
     >>> # Accessing the model configuration
     >>> configuration = model.config
     ```"""
+
     model_type = "pvt_v2"
 
     def __init__(
@@ -139,7 +139,7 @@ class PvtV2Config(PretrainedConfig, BackboneConfigMixin):
         num_labels: int = 1000,
         attn_reduce: str = "SR",  # Set to "SR" for spatial reduction (Conv2d), "AP" for average pooling
         out_features=None,
-        out_indices=[1, 2, 3],
+        out_indices=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -151,11 +151,15 @@ class PvtV2Config(PretrainedConfig, BackboneConfigMixin):
                 FutureWarning,
             )
 
+        if kwargs.get("_out_indices", None) is not None:
+            out_indices = kwargs["_out_indices"]
+            out_features = None
+
         if isinstance(image_size, int):
-            image_size = _ntuple(2)(image_size)
+            image_size = (image_size, image_size)
         if isinstance(image_size, dict):
             req_keys = ("height", "width")
-            assert all([k in req_keys for k in image_size.keys()]), f"Image size dict must have keys: {req_keys}"
+            assert all(k in req_keys for k in image_size.keys()), f"Image size dict must have keys: {req_keys}"
         elif isinstance(image_size, Sequence):
             image_size = {"height": image_size[0], "width": image_size[1]}
         self.image_size = image_size
