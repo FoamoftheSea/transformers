@@ -1706,10 +1706,10 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
         # Then, apply 1x1 convolution to reduce the channel dimension to d_model (256 by default)
         sources = []
         masks = []
-        start_idx = 1 if 0 in self.config.backbone_config.out_indices else 0
-        position_embeddings_list = position_embeddings_list[start_idx:]
-        for level, (source, mask) in enumerate(features[start_idx:]):
-            sources.append(self.input_proj[level](source))
+        position_embeddings_list = [position_embeddings_list[i] for i in self.config.det2d_input_feature_levels]
+        for proj_level, feature_level in enumerate(self.config.det2d_input_feature_levels):
+            source, mask = features[feature_level]
+            sources.append(self.input_proj[proj_level](source))
             masks.append(mask)
             if mask is None:
                 raise ValueError("No attention mask was provided")
