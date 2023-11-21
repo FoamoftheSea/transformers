@@ -211,6 +211,7 @@ class MultiformerConfig(PretrainedConfig):
         det2d_input_proj_strides=None,
         det2d_input_proj_pads=None,
         det2d_input_proj_groups=32,
+        det2d_box_keep_prob=0.5,
         encoder_n_points=4,
         decoder_n_points=4,
         two_stage=False,
@@ -336,6 +337,7 @@ class MultiformerConfig(PretrainedConfig):
         self.det2d_input_feature_levels = det2d_input_feature_levels
         self.det2d_extra_feature_levels = det2d_extra_feature_levels
         self.det2d_input_proj_groups = det2d_input_proj_groups
+        self.det2d_box_keep_prob = det2d_box_keep_prob
         self.encoder_n_points = encoder_n_points
         self.decoder_n_points = decoder_n_points
         self.two_stage = two_stage

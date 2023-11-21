@@ -2123,6 +2123,7 @@ class Multiformer(DeformableDetrPreTrainedModel):
                 num_classes=self.config.num_labels,
                 focal_alpha=self.config.focal_alpha,
                 losses=losses,
+                keep_box_prob=self.config.det2d_box_keep_prob,
             )
             criterion.to(self.device)
             # Third: compute the losses, based on outputs and labels
@@ -2332,12 +2333,13 @@ class DeformableDetrLoss(nn.Module):
             List of all the losses to be applied. See `get_loss` for a list of all available losses.
     """
 
-    def __init__(self, matcher, num_classes, focal_alpha, losses):
+    def __init__(self, matcher, num_classes, focal_alpha, losses, keep_box_prob):
         super().__init__()
         self.matcher = matcher
         self.num_classes = num_classes
         self.focal_alpha = focal_alpha
         self.losses = losses
+        self.keep_box_prob = keep_box_prob
 
     # removed logging parameter, which was part of the original implementation
     def loss_labels(self, outputs, targets, indices, num_boxes):
@@ -2375,19 +2377,22 @@ class DeformableDetrLoss(nn.Module):
 
     @torch.no_grad()
     # Copied from transformers.models.detr.modeling_detr.DetrLoss.loss_cardinality
-    def loss_cardinality(self, outputs, targets, indices, num_boxes, threshold=0.35):
+    def loss_cardinality(self, outputs, targets, indices, num_boxes, threshold=None):
         """
         Compute the cardinality error, i.e. the absolute error in the number of predicted non-empty boxes.
 
         This is not really a loss, it is intended for logging purposes only. It doesn't propagate gradients.
         """
+        if threshold is None:
+            threshold = self.keep_box_prob
         logits = outputs["logits"]
         device = logits.device
         target_lengths = torch.as_tensor([len(v["class_labels"]) for v in targets], device=device)
         # Count the number of predictions that are NOT "no-object" (which is the last class)
         card_pred = (logits.sigmoid().max(-1)[0] >= threshold).sum(1)
         card_err = nn.functional.l1_loss(card_pred.float(), target_lengths.float())
-        losses = {"cardinality_error": card_err}
+        true_diff = card_pred.float() - target_lengths.float()
+        losses = {"cardinality_error": card_err, "num_boxes_error": true_diff}
         return losses
 
     # Copied from transformers.models.detr.modeling_detr.DetrLoss.loss_boxes
