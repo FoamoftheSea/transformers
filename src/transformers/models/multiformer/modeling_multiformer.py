@@ -478,28 +478,6 @@ class DeformableDetrConvEncoder(nn.Module):
         return out
 
 
-# Copied from transformers.models.detr.modeling_detr.DetrConvModel with Detr->DeformableDetr
-class DeformableDetrConvModel(nn.Module):
-    """
-    This module adds 2D position embeddings to all intermediate feature maps of the convolutional encoder.
-    """
-
-    def __init__(self, conv_encoder, position_embedding):
-        super().__init__()
-        self.conv_encoder = conv_encoder
-        self.position_embedding = position_embedding
-
-    def forward(self, pixel_values, pixel_mask):
-        # send pixel_values and pixel_mask through backbone to get list of (feature_map, pixel_mask) tuples
-        out = self.conv_encoder(pixel_values, pixel_mask)
-        pos = []
-        for feature_map, mask in out:
-            # position encoding
-            pos.append(self.position_embedding(feature_map, mask).to(feature_map.dtype))
-
-        return out, pos
-
-
 # Copied from transformers.models.detr.modeling_detr._expand_mask
 def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, target_len: Optional[int] = None):
     """
@@ -1515,25 +1493,30 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
         super().__init__(config)
 
         # Create backbone + positional encoding
-        backbone = DeformableDetrConvEncoder(config)
-        position_embeddings = build_position_encoding(config)
-        self.backbone = DeformableDetrConvModel(backbone, position_embeddings)
+        self.backbone = DeformableDetrConvEncoder(config)
+        self.position_embedding = build_position_encoding(config)
 
         # Create input projection layers
         input_proj_list = []
-        for i in config.det2d_input_feature_levels:
-            in_channels = backbone.intermediate_channel_sizes[i]
+        input_proj_parms = zip(
+            config.det2d_input_feature_levels,
+            config.det2d_input_proj_kernels,
+            config.det2d_input_proj_strides,
+            config.det2d_input_proj_pads
+        )
+        for level_idx, kernel, stride, padding in input_proj_parms:
+            in_channels = self.backbone.intermediate_channel_sizes[level_idx]
             input_proj_list.append(
                 nn.Sequential(
-                    nn.Conv2d(in_channels, config.d_model, kernel_size=1),
-                    nn.GroupNorm(32, config.d_model),
+                    nn.Conv2d(in_channels, config.d_model, kernel_size=kernel, stride=stride, padding=padding),
+                    nn.GroupNorm(config.det2d_input_proj_groups, config.d_model),
                 )
             )
         for _ in range(config.det2d_extra_feature_levels):
             input_proj_list.append(
                 nn.Sequential(
                     nn.Conv2d(in_channels, config.d_model, kernel_size=3, stride=2, padding=1),
-                    nn.GroupNorm(32, config.d_model),
+                    nn.GroupNorm(config.det2d_input_proj_groups, config.d_model),
                 )
             )
             in_channels = config.d_model
@@ -1706,11 +1689,17 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
         # Then, apply 1x1 convolution to reduce the channel dimension to d_model (256 by default)
         sources = []
         masks = []
-        position_embeddings_list = [position_embeddings_list[i] for i in self.config.det2d_input_feature_levels]
+        # position_embeddings_list = [position_embeddings_list[i] for i in self.config.det2d_input_feature_levels]
+        position_embeddings_list = []
         for proj_level, feature_level in enumerate(self.config.det2d_input_feature_levels):
             source, mask = features[feature_level]
-            sources.append(self.input_proj[proj_level](source))
+            source = self.input_proj[proj_level](source)
+            if self.config.det2d_input_proj_strides[proj_level] > 1:
+                mask = nn.functional.interpolate(pixel_mask[None].float(), size=source.shape[-2:]).to(torch.bool)[0]
+            pos_l = self.position_embedding(source, mask).to(source.dtype)
+            sources.append(source)
             masks.append(mask)
+            position_embeddings_list.append(pos_l)
             if mask is None:
                 raise ValueError("No attention mask was provided")
 
@@ -1723,7 +1712,7 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
                 else:
                     source = self.input_proj[level](sources[-1])
                 mask = nn.functional.interpolate(pixel_mask[None].float(), size=source.shape[-2:]).to(torch.bool)[0]
-                pos_l = self.backbone.position_embedding(source, mask).to(source.dtype)
+                pos_l = self.position_embedding(source, mask).to(source.dtype)
                 sources.append(source)
                 masks.append(mask)
                 position_embeddings_list.append(pos_l)
