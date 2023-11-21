@@ -2391,8 +2391,10 @@ class DeformableDetrLoss(nn.Module):
         # Count the number of predictions that are NOT "no-object" (which is the last class)
         card_pred = (logits.sigmoid().max(-1)[0] >= threshold).sum(1)
         card_err = nn.functional.l1_loss(card_pred.float(), target_lengths.float())
-        true_diff = (card_pred.float() - target_lengths.float()).mean()
-        losses = {"cardinality_error": card_err, "num_boxes_error": true_diff}
+        true_diff = (card_pred.float() - target_lengths.float())
+        losses = {"cardinality_error": card_err, "num_boxes_error": {}}
+        for i, value in enumerate(true_diff):
+            losses["num_boxes_error"][i] = value
         return losses
 
     # Copied from transformers.models.detr.modeling_detr.DetrLoss.loss_boxes
