@@ -2333,7 +2333,7 @@ class DeformableDetrLoss(nn.Module):
             List of all the losses to be applied. See `get_loss` for a list of all available losses.
     """
 
-    def __init__(self, matcher, num_classes, focal_alpha, losses, keep_box_prob):
+    def __init__(self, matcher, num_classes, focal_alpha, losses, keep_box_prob=0.35):
         super().__init__()
         self.matcher = matcher
         self.num_classes = num_classes
