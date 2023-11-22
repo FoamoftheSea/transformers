@@ -1,4 +1,6 @@
-from transformers import PvtV2Config, PvtV2Model, DeformableDetrForObjectDetection, DeformableDetrConfig, AutoBackbone, ResNetConfig
+from transformers import AutoBackbone, DeformableDetrConfig, DeformableDetrForObjectDetection, PvtV2Config, PvtV2Model
+
+
 AutoBackbone.register(PvtV2Config, PvtV2Model)
 model = DeformableDetrForObjectDetection(
     DeformableDetrConfig(
@@ -9,4 +11,4 @@ model = DeformableDetrForObjectDetection(
     )
 )
 
-print('here')
+print("here")

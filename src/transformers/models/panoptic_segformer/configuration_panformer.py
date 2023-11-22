@@ -143,6 +143,7 @@ class PanopticSegformerConfig(PretrainedConfig):
     >>> # Accessing the model configuration
     >>> configuration = model.config
     ```"""
+
     model_type = "deformable_detr"
     attribute_map = {
         "hidden_size": "d_model",

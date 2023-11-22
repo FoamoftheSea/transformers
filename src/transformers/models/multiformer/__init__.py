@@ -66,7 +66,6 @@ if TYPE_CHECKING:
             DEFORMABLE_DETR_PRETRAINED_MODEL_ARCHIVE_LIST,
             Multiformer,
             MultiformerModel,
-            # DeformableDetrPreTrainedModel,
         )
 
 else:

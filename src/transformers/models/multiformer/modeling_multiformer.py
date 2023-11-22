@@ -29,8 +29,7 @@ from torch.autograd.function import once_differentiable
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss
 
 from transformers.models.deformable_detr.load_custom import load_cuda_kernels
-from ..glpn.modeling_glpn import GLPNDecoder, GLPNDepthEstimationHead, GLPNDecoderStage
-from ..segformer.modeling_segformer import SegformerMLP
+
 from ... import SegformerDecodeHead
 from ...activations import ACT2FN
 from ...file_utils import (
@@ -49,7 +48,11 @@ from ...modeling_utils import PreTrainedModel
 from ...pytorch_utils import meshgrid
 from ...utils import is_ninja_available, logging
 from ..auto import AutoBackbone
+from ..glpn.modeling_glpn import GLPNDecoder, GLPNDecoderStage, GLPNDepthEstimationHead
+from ..segformer.modeling_segformer import SegformerMLP
 from .configuration_multiformer import MultiformerConfig
+
+
 # from .load_custom import load_cuda_kernels
 
 
@@ -1398,7 +1401,6 @@ class DeformableDetrDecoder(DeformableDetrPreTrainedModel):
                 all_hidden_states += (hidden_states,)
 
             if self.gradient_checkpointing and self.training:
-
                 # def create_custom_forward(module):
                 #     def custom_forward(*inputs):
                 #         return module(*inputs, output_attentions)
@@ -1507,7 +1509,7 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
             config.det2d_input_feature_levels,
             config.det2d_input_proj_kernels,
             config.det2d_input_proj_strides,
-            config.det2d_input_proj_pads
+            config.det2d_input_proj_pads,
         )
         for level_idx, kernel, stride, padding in input_proj_parms:
             in_channels = self.backbone.intermediate_channel_sizes[level_idx]
@@ -2095,12 +2097,13 @@ class Multiformer(DeformableDetrPreTrainedModel):
             )
             if self.config.num_labels > 1:
                 loss_fct = CrossEntropyLoss(
-                    ignore_index=self.config.semantic_loss_ignore_index,
-                    weight=self.class_loss_weights
+                    ignore_index=self.config.semantic_loss_ignore_index, weight=self.class_loss_weights
                 )
                 labels_loss = loss_fct(upsampled_logits, labels_semantic)
             elif self.config.num_labels == 1:
-                valid_mask = ((labels_semantic >= 0) & (labels_semantic != self.config.semantic_loss_ignore_index)).float()
+                valid_mask = (
+                    (labels_semantic >= 0) & (labels_semantic != self.config.semantic_loss_ignore_index)
+                ).float()
                 loss_fct = BCEWithLogitsLoss(reduction="none")
                 labels_loss = loss_fct(upsampled_logits.squeeze(1), labels_semantic.float())
                 labels_loss = (labels_loss * valid_mask).mean()
@@ -2151,7 +2154,9 @@ class Multiformer(DeformableDetrPreTrainedModel):
                 for i in range(self.config.decoder_layers - 1):
                     aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})
                 weight_dict.update(aux_weight_dict)
-            loss[MultiformerTask.DET_2D] = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+            loss[MultiformerTask.DET_2D] = sum(
+                loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict
+            )
 
         if not return_dict:
             if auxiliary_outputs is not None:
@@ -2301,12 +2306,20 @@ class MAELoss(torch.nn.Module):
 
 
 class DepthTrainLoss(torch.nn.Module):
-
-    def __init__(self, losses={"silog": 1.0, "mae": 0.1}, log_predictions=True, log_labels=False, silog_lambda=0.5, sqrt_silog=False):
+    def __init__(
+        self,
+        losses={"silog": 1.0, "mae": 0.1},
+        log_predictions=True,
+        log_labels=False,
+        silog_lambda=0.5,
+        sqrt_silog=False,
+    ):
         super().__init__()
         self.losses = {k: {"weight": v} for k, v in losses.items()}
         if "silog" in self.losses:
-            self.losses["silog"]["func"] = SiLogLoss(lambd=silog_lambda, sqrt_output=sqrt_silog, log_predictions=log_predictions, log_labels=log_labels)
+            self.losses["silog"]["func"] = SiLogLoss(
+                lambd=silog_lambda, sqrt_output=sqrt_silog, log_predictions=log_predictions, log_labels=log_labels
+            )
         if "mae" in self.losses:
             self.losses["mae"]["func"] = MAELoss(log_predictions=log_predictions, log_labels=log_labels)
 
@@ -2396,7 +2409,7 @@ class DeformableDetrLoss(nn.Module):
         # Count the number of predictions that are NOT "no-object" (which is the last class)
         card_pred = (logits.sigmoid().max(-1)[0] >= threshold).sum(1)
         card_err = nn.functional.l1_loss(card_pred.float(), target_lengths.float())
-        true_diff = (card_pred.float() - target_lengths.float())
+        true_diff = card_pred.float() - target_lengths.float()
         losses = {"cardinality_error": card_err, "num_boxes_error": {}}
         for i, value in enumerate(true_diff):
             losses["num_boxes_error"][i] = value

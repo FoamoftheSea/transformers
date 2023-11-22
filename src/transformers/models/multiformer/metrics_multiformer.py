@@ -1,5 +1,5 @@
 from collections import Counter
-from typing import Optional, Dict, Set, List
+from typing import Dict, Optional, Set
 
 import numpy as np
 import torch
@@ -7,15 +7,12 @@ from torchmetrics.detection import MeanAveragePrecision
 
 from transformers import EvalPrediction
 from transformers.models.multiformer.image_processing_multiformer import post_process_object_detection
-from transformers.models.multiformer.modeling_multiformer import MultiformerTask, IRMSELoss, SiLogLoss
+from transformers.models.multiformer.modeling_multiformer import IRMSELoss, MultiformerTask, SiLogLoss
 
 
 class MultiformerSemanticEvalMetric:
     def __init__(
-            self,
-            id2label: Dict[int, str],
-            ignore_class_ids: Optional[Set[int]] = None,
-            reduced_labels: bool = False
+        self, id2label: Dict[int, str], ignore_class_ids: Optional[Set[int]] = None, reduced_labels: bool = False
     ):
         self.total_area_intersect = Counter()
         self.total_area_union = Counter()
@@ -25,7 +22,6 @@ class MultiformerSemanticEvalMetric:
         self.id2label = id2label
 
     def update(self, preds: np.ndarray, target: np.ndarray):
-
         logits_tensor = torch.from_numpy(preds)
         # scale the logits to the size of the label
         logits_tensor = torch.nn.functional.interpolate(
@@ -52,7 +48,9 @@ class MultiformerSemanticEvalMetric:
             self.total_label_area.update({class_label: np.sum(gt_pixels)})
 
     def compute(self):
-        accuracies = {f"accuracy_{k}": self.total_area_intersect[k] / self.total_label_area[k] for k in self.total_area_union}
+        accuracies = {
+            f"accuracy_{k}": self.total_area_intersect[k] / self.total_label_area[k] for k in self.total_area_union
+        }
         ious = {f"iou_{k}": self.total_area_intersect[k] / self.total_area_union[k] for k in self.total_area_union}
         metrics = {
             "overall_accuracy": sum(self.total_area_intersect.values()) / sum(self.total_label_area.values()),
@@ -102,7 +100,6 @@ class MultiformerDepthEvalMetric:
 
 
 class MultiformerMetric:
-
     def __init__(
         self,
         id2label: Optional[Dict[int, str]] = None,
@@ -121,9 +118,7 @@ class MultiformerMetric:
         self.metrics = {
             "det_2d": MeanAveragePrecision(),
             "semseg": MultiformerSemanticEvalMetric(
-                id2label=self.id2label,
-                ignore_class_ids=self.ignore_class_ids,
-                reduced_labels=self.reduced_labels
+                id2label=self.id2label, ignore_class_ids=self.ignore_class_ids, reduced_labels=self.reduced_labels
             ),
             "depth": MultiformerDepthEvalMetric(),
         }
@@ -132,9 +127,7 @@ class MultiformerMetric:
         if task == MultiformerTask.DET_2D:
             target_sizes = [eval_pred.inputs[i, 0].shape for i in range(eval_pred.inputs.shape[0])]
             preds = post_process_object_detection(
-                eval_pred.predictions,
-                threshold=self.box_score_threshold,
-                target_sizes=target_sizes
+                eval_pred.predictions, threshold=self.box_score_threshold, target_sizes=target_sizes
             )
 
             target = [
