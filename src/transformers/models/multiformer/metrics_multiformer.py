@@ -108,7 +108,7 @@ class MultiformerMetric:
         id2label: Optional[Dict[int, str]] = None,
         ignore_class_ids: Optional[Set[int]] = None,
         reduced_labels: bool = False,
-        box_score_threshold: float = 0.35,
+        box_score_threshold: float = 0.5,
     ):
         self.id2label = id2label
         self.ignore_class_ids = ignore_class_ids

@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """ Deformable DETR model configuration"""
+from typing import Sequence
+
 from ... import PvtV2Config
 from ...configuration_utils import PretrainedConfig
 from ...utils import logging
@@ -205,6 +207,11 @@ class MultiformerConfig(PretrainedConfig):
         dilation=False,
         det2d_input_feature_levels=None,
         det2d_extra_feature_levels=1,
+        det2d_input_proj_kernels=None,
+        det2d_input_proj_strides=None,
+        det2d_input_proj_pads=None,
+        det2d_input_proj_groups=32,
+        det2d_box_keep_prob=0.5,
         encoder_n_points=4,
         decoder_n_points=4,
         two_stage=False,
@@ -247,6 +254,54 @@ class MultiformerConfig(PretrainedConfig):
             )
 
         self.num_feature_levels = len(det2d_input_feature_levels) + det2d_extra_feature_levels
+
+        n_layers = len(det2d_input_feature_levels)
+
+        if det2d_input_proj_kernels is None:
+            self.det2d_input_proj_kernels = [1 for _ in range(n_layers)]
+        elif isinstance(det2d_input_proj_kernels, Sequence):
+            if len(det2d_input_proj_kernels) != n_layers:
+                raise ValueError(
+                    "det2d_input_proj_kernels must same length as det2d_input_feature_levels: ({})".format(
+                        n_layers
+                    )
+                )
+            self.det2d_input_proj_kernels = list(det2d_input_proj_kernels)
+        else:
+            raise TypeError(
+                "det2d_input_proj_kernels must be Sequence, got {}".format(type(det2d_input_proj_kernels))
+            )
+
+        if det2d_input_proj_strides is None:
+            self.det2d_input_proj_strides = [1 for _ in range(n_layers)]
+        elif isinstance(det2d_input_proj_strides, Sequence):
+            if len(det2d_input_proj_strides) != n_layers:
+                raise ValueError(
+                    "det2d_input_proj_strides must same length as det2d_input_feature_levels: ({})".format(
+                        n_layers
+                    )
+                )
+            self.det2d_input_proj_strides = list(det2d_input_proj_strides)
+        else:
+            raise TypeError(
+                "det2d_input_proj_strides must be Sequence, got {}".format(type(det2d_input_proj_strides))
+            )
+
+        if det2d_input_proj_pads is None:
+            self.det2d_input_proj_pads = [0 for _ in range(n_layers)]
+        elif isinstance(det2d_input_proj_pads, Sequence):
+            if len(det2d_input_proj_pads) != n_layers:
+                raise ValueError(
+                    "det2d_input_proj_pads must same length as det2d_input_feature_levels: ({})".format(
+                        n_layers
+                    )
+                )
+            self.det2d_input_proj_pads = list(det2d_input_proj_pads)
+        else:
+            raise TypeError(
+                "det2d_input_proj_pads must be Sequence, got {}".format(type(det2d_input_proj_pads))
+            )
+
         self.use_timm_backbone = use_timm_backbone
         self.backbone_config = backbone_config
         self.num_channels = num_channels
@@ -281,6 +336,8 @@ class MultiformerConfig(PretrainedConfig):
         # deformable attributes
         self.det2d_input_feature_levels = det2d_input_feature_levels
         self.det2d_extra_feature_levels = det2d_extra_feature_levels
+        self.det2d_input_proj_groups = det2d_input_proj_groups
+        self.det2d_box_keep_prob = det2d_box_keep_prob
         self.encoder_n_points = encoder_n_points
         self.decoder_n_points = decoder_n_points
         self.two_stage = two_stage
