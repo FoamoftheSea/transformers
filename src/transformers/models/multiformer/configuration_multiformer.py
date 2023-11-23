@@ -163,6 +163,7 @@ class MultiformerConfig(PretrainedConfig):
     >>> # Accessing the model configuration
     >>> configuration = model.config
     ```"""
+
     model_type = "multiformer"
     attribute_map = {
         "hidden_size": "d_model",
@@ -249,8 +250,8 @@ class MultiformerConfig(PretrainedConfig):
 
         if not all([idx < len(backbone_config.out_indices) for idx in det2d_input_feature_levels]):
             raise ValueError(
-                "All det2d_input_feature_levels must correspond to backbone output layers, re-indexed at zero. \n" +
-                "Example: if backbone_config.out_indices == [1, 3, 4], these become [0, 1, 2] as det2d input levels."
+                "All det2d_input_feature_levels must correspond to backbone output layers, re-indexed at zero. \n"
+                + "Example: if backbone_config.out_indices == [1, 3, 4], these become [0, 1, 2] as det2d input levels."
             )
 
         self.num_feature_levels = len(det2d_input_feature_levels) + det2d_extra_feature_levels
@@ -262,45 +263,33 @@ class MultiformerConfig(PretrainedConfig):
         elif isinstance(det2d_input_proj_kernels, Sequence):
             if len(det2d_input_proj_kernels) != n_layers:
                 raise ValueError(
-                    "det2d_input_proj_kernels must same length as det2d_input_feature_levels: ({})".format(
-                        n_layers
-                    )
+                    "det2d_input_proj_kernels must same length as det2d_input_feature_levels: ({})".format(n_layers)
                 )
             self.det2d_input_proj_kernels = list(det2d_input_proj_kernels)
         else:
-            raise TypeError(
-                "det2d_input_proj_kernels must be Sequence, got {}".format(type(det2d_input_proj_kernels))
-            )
+            raise TypeError("det2d_input_proj_kernels must be Sequence, got {}".format(type(det2d_input_proj_kernels)))
 
         if det2d_input_proj_strides is None:
             self.det2d_input_proj_strides = [1 for _ in range(n_layers)]
         elif isinstance(det2d_input_proj_strides, Sequence):
             if len(det2d_input_proj_strides) != n_layers:
                 raise ValueError(
-                    "det2d_input_proj_strides must same length as det2d_input_feature_levels: ({})".format(
-                        n_layers
-                    )
+                    "det2d_input_proj_strides must same length as det2d_input_feature_levels: ({})".format(n_layers)
                 )
             self.det2d_input_proj_strides = list(det2d_input_proj_strides)
         else:
-            raise TypeError(
-                "det2d_input_proj_strides must be Sequence, got {}".format(type(det2d_input_proj_strides))
-            )
+            raise TypeError("det2d_input_proj_strides must be Sequence, got {}".format(type(det2d_input_proj_strides)))
 
         if det2d_input_proj_pads is None:
             self.det2d_input_proj_pads = [0 for _ in range(n_layers)]
         elif isinstance(det2d_input_proj_pads, Sequence):
             if len(det2d_input_proj_pads) != n_layers:
                 raise ValueError(
-                    "det2d_input_proj_pads must same length as det2d_input_feature_levels: ({})".format(
-                        n_layers
-                    )
+                    "det2d_input_proj_pads must same length as det2d_input_feature_levels: ({})".format(n_layers)
                 )
             self.det2d_input_proj_pads = list(det2d_input_proj_pads)
         else:
-            raise TypeError(
-                "det2d_input_proj_pads must be Sequence, got {}".format(type(det2d_input_proj_pads))
-            )
+            raise TypeError("det2d_input_proj_pads must be Sequence, got {}".format(type(det2d_input_proj_pads)))
 
         self.use_timm_backbone = use_timm_backbone
         self.backbone_config = backbone_config

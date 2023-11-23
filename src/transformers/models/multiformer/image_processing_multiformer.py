@@ -21,7 +21,6 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Un
 
 import numpy as np
 
-from ..detr.modeling_detr import DetrObjectDetectionOutput
 from ...feature_extraction_utils import BatchFeature
 from ...image_processing_utils import BaseImageProcessor, get_size_dict
 from ...image_transforms import (
@@ -63,6 +62,7 @@ from ...utils import (
     is_vision_available,
     logging,
 )
+from ..detr.modeling_detr import DetrObjectDetectionOutput
 
 
 if is_torch_available():
