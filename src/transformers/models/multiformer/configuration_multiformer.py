@@ -40,6 +40,8 @@ class MultiformerConfig(PretrainedConfig):
     documentation from [`PretrainedConfig`] for more information.
 
     Args:
+        tasks (`List[str]`, *optional*, defaults to ["semseg", "depth", "det2d"]):
+            List of tasks to make predictions for. Model will not predict or backprop loss for tasks not in list.
         use_timm_backbone (`bool`, *optional*, defaults to `True`):
             Whether or not to use the `timm` library for the backbone. If set to `False`, will use the [`AutoBackbone`]
             API.
@@ -125,6 +127,8 @@ class MultiformerConfig(PretrainedConfig):
             The indices of backbone feature levels to use for deformable DETR.
         det2d_extra_feature_levels (`int`, *optional*, defaults to 1):
             The number of extra feature levels to create from the deepest backbone level used.
+        det2d_use_pos_embed (`bool`, *optional*, defaults to True):
+            Whether to generate and add positional embeddings into feature layers for deformable DETR.
         encoder_n_points (`int`, *optional*, defaults to 4):
             The number of sampled keys in each feature level for each attention head in the encoder.
         decoder_n_points (`int`, *optional*, defaults to 4):
@@ -172,6 +176,7 @@ class MultiformerConfig(PretrainedConfig):
 
     def __init__(
         self,
+        tasks=["semseg", "depth", "det2d"],
         use_timm_backbone=False,
         backbone_config=PvtV2Config(
             mlp_ratios=[4, 4, 4, 4],
@@ -212,6 +217,7 @@ class MultiformerConfig(PretrainedConfig):
         det2d_input_proj_strides=None,
         det2d_input_proj_pads=None,
         det2d_input_proj_groups=32,
+        det2d_use_pos_embed=True,
         det2d_box_keep_prob=0.5,
         encoder_n_points=4,
         decoder_n_points=4,
@@ -291,6 +297,7 @@ class MultiformerConfig(PretrainedConfig):
         else:
             raise TypeError("det2d_input_proj_pads must be Sequence, got {}".format(type(det2d_input_proj_pads)))
 
+        self.tasks = tasks
         self.use_timm_backbone = use_timm_backbone
         self.backbone_config = backbone_config
         self.num_channels = num_channels
@@ -326,6 +333,7 @@ class MultiformerConfig(PretrainedConfig):
         self.det2d_input_feature_levels = det2d_input_feature_levels
         self.det2d_extra_feature_levels = det2d_extra_feature_levels
         self.det2d_input_proj_groups = det2d_input_proj_groups
+        self.det2d_use_pos_embed = det2d_use_pos_embed
         self.det2d_box_keep_prob = det2d_box_keep_prob
         self.encoder_n_points = encoder_n_points
         self.decoder_n_points = decoder_n_points
