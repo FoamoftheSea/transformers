@@ -1,5 +1,5 @@
 from collections import Counter
-from typing import Dict, Optional, Set
+from typing import Dict, Optional, Set, List
 
 import numpy as np
 import torch
@@ -102,11 +102,13 @@ class MultiformerDepthEvalMetric:
 class MultiformerMetric:
     def __init__(
         self,
+        tasks: List[str] = ["det2d", "semseg", "depth"],
         id2label: Optional[Dict[int, str]] = None,
         ignore_class_ids: Optional[Set[int]] = None,
         reduced_labels: bool = False,
         box_score_threshold: float = 0.5,
     ):
+        self.tasks = tasks
         self.id2label = id2label
         self.ignore_class_ids = ignore_class_ids
         self.reduced_labels = reduced_labels
@@ -115,13 +117,15 @@ class MultiformerMetric:
         self.reset_metrics()
 
     def reset_metrics(self):
-        self.metrics = {
-            "det_2d": MeanAveragePrecision(),
-            "semseg": MultiformerSemanticEvalMetric(
+        self.metrics = {}
+        if "det2d" in self.tasks:
+            self.metrics["det_2d"] = MeanAveragePrecision()
+        if "semseg" in self.tasks:
+            self.metrics["semseg"] = MultiformerSemanticEvalMetric(
                 id2label=self.id2label, ignore_class_ids=self.ignore_class_ids, reduced_labels=self.reduced_labels
-            ),
-            "depth": MultiformerDepthEvalMetric(),
-        }
+            )
+        if "depth" in self.tasks:
+            self.metrics["depth"] = MultiformerDepthEvalMetric()
 
     def convert_eval_pred(self, eval_pred, task):
         if task == MultiformerTask.DET_2D:
