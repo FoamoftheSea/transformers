@@ -2077,6 +2077,8 @@ class Multiformer(DeformableDetrPreTrainedModel):
         init_reference = outputs.init_reference_points if return_dict else outputs[0]
         inter_references = outputs.intermediate_reference_points if return_dict else outputs[3]
 
+        logits, pred_boxes, logits_semantic, predicted_depth = None, None, None, None
+
         if "det2d" in self.config.tasks:
             # class logits + predicted bounding boxes
             outputs_classes = []
