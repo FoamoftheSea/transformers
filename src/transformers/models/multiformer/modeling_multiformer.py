@@ -2036,6 +2036,10 @@ class Multiformer(DeformableDetrPreTrainedModel):
         self.bbox_embed = DeformableDetrMLPPredictionHead(
             input_dim=config.d_model, hidden_dim=config.d_model, output_dim=4, num_layers=3
         )
+        # 3D boxes: (dx, dy, dz, phi, l, w, h)
+        self.bbox3d_embed = DeformableDetrMLPPredictionHead(
+            input_dim=config.d_model, hidden_dim=config.d_model, output_dim=7, num_layers=3
+        )
 
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
@@ -2055,6 +2059,7 @@ class Multiformer(DeformableDetrPreTrainedModel):
             nn.init.constant_(self.bbox_embed.layers[-1].bias.data[2:], -2.0)
             self.class_embed = nn.ModuleList([self.class_embed for _ in range(num_pred)])
             self.bbox_embed = nn.ModuleList([self.bbox_embed for _ in range(num_pred)])
+            self.bbox3d_embed = nn.ModuleList([self.bbox3d_embed for _ in range(num_pred)])
             self.model.decoder.bbox_embed = None
         if config.two_stage:
             # hack implementation for two-stage
@@ -2158,10 +2163,11 @@ class Multiformer(DeformableDetrPreTrainedModel):
         logits, pred_boxes = None, None
         # features = tuple(level[0] for level in outputs.backbone_features)
 
-        if "det2d" in self.config.tasks:
+        if any(task in self.config.tasks + self.config.train_tasks for task in ["det2d", "det3d"]):
             # class logits + predicted bounding boxes
             outputs_classes = []
-            outputs_coords = []
+            outputs_coords_2d = []
+            outputs_boxes_3d = []
 
             for level in range(hidden_states.shape[1]):
                 if not self.config.auxiliary_loss and level != hidden_states.shape[1] - 1:
@@ -2172,30 +2178,45 @@ class Multiformer(DeformableDetrPreTrainedModel):
                     reference = inter_references[:, level - 1]
                 reference = inverse_sigmoid(reference)
                 outputs_class = self.class_embed[level](hidden_states[:, level])
-                delta_bbox = self.bbox_embed[level](hidden_states[:, level])
-                if reference.shape[-1] == 4:
-                    outputs_coord_logits = delta_bbox + reference
-                elif reference.shape[-1] == 2:
-                    delta_bbox[..., :2] += reference
-                    outputs_coord_logits = delta_bbox
-                else:
-                    raise ValueError(f"reference.shape[-1] should be 4 or 2, but got {reference.shape[-1]}")
-                outputs_coord = outputs_coord_logits.sigmoid()
                 outputs_classes.append(outputs_class)
-                outputs_coords.append(outputs_coord)
+
+                if "det2d" in self.config.tasks + self.config.train_tasks:
+                    delta_bbox = self.bbox_embed[level](hidden_states[:, level])
+                    if reference.shape[-1] == 4:
+                        outputs_coord_logits = delta_bbox + reference
+                    elif reference.shape[-1] == 2:
+                        delta_bbox[..., :2] += reference
+                        outputs_coord_logits = delta_bbox
+                    else:
+                        raise ValueError(f"reference.shape[-1] should be 4 or 2, but got {reference.shape[-1]}")
+                    outputs_coord_2d = outputs_coord_logits.sigmoid()
+                    outputs_coords_2d.append(outputs_coord_2d)
+
+                if "det3d" in self.config.tasks + self.config.train_tasks:
+                    box_output = self.bbox3d_embed[level](hidden_states[:, level])
+                    outputs_coord_logits = box_output[..., :2] + reference
+                    outputs_coord_2d = outputs_coord_logits.tanh()
+                    z_offset = box_output[..., 2].unsqueeze(-1)
+                    z_sample = nn.functional.grid_sample(
+                        outputs.predicted_depth.unsqueeze(1), outputs_coord_2d.unsqueeze(-2), align_corners=False
+                    ).squeeze(1)
+                    z_sample += z_offset
+                    uv = outputs_coord_logits.sigmoid() * torch.tensor(pixel_values.transpose(-1, -2).shape[-2:])
+                    uv1 = torch.cat([uv, torch.ones_like(uv[..., :1])], dim=-1)
+                    xyz = (torch.linalg.inv(intrinsics) @ uv1.transpose(-1, -2)) * torch.exp(z_sample).flatten(-2)
+                    heading_logits = box_output[..., 3]
+                    heading = heading_logits.tanh() * torch.pi
+                    lwh = box_output[..., 4:] * 10  # Model estimates lwh in m/10 to reduce values
+                    output_boxes_3d = torch.cat([xyz.transpose(-1, -2), heading.unsqueeze(-1), lwh], dim=-1)
+                    outputs_boxes_3d.append(output_boxes_3d)
+
             outputs_class = torch.stack(outputs_classes)
-            outputs_coord = torch.stack(outputs_coords)
+            outputs_coord = torch.stack(outputs_coords_2d)
+            outputs_boxes_3d = torch.stack(outputs_boxes_3d)
 
             logits = outputs_class[-1]
             pred_boxes = outputs_coord[-1]
-
-        features = tuple(level[0] for level in outputs.backbone_features)
-
-        if "semseg" in self.config.tasks:
-            logits_semantic = self.semantic_head(features)
-        if "depth" in self.config.tasks:
-            depth_decoder_out = self.depth_decoder(features)
-            predicted_depth = self.depth_head(depth_decoder_out)
+            pred_boxes_3d = outputs_boxes_3d[-1]
 
         loss = {}
         if labels_semantic is not None and "semseg" in self.config.train_tasks:
