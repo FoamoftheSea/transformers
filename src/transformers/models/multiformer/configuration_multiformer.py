@@ -177,6 +177,8 @@ class MultiformerConfig(PretrainedConfig):
     def __init__(
         self,
         tasks=["semseg", "depth", "det2d"],
+        train_tasks=["semseg", "depth", "det2d"],
+        train_backbone=True,
         use_timm_backbone=False,
         backbone_config=PvtV2Config(
             mlp_ratios=[4, 4, 4, 4],
@@ -219,6 +221,8 @@ class MultiformerConfig(PretrainedConfig):
         det2d_input_proj_groups=32,
         det2d_use_pos_embed=True,
         det2d_box_keep_prob=0.5,
+        det2d_fuse_semantic=False,
+        det2d_fuse_depth=False,
         encoder_n_points=4,
         decoder_n_points=4,
         two_stage=False,
@@ -298,6 +302,8 @@ class MultiformerConfig(PretrainedConfig):
             raise TypeError("det2d_input_proj_pads must be Sequence, got {}".format(type(det2d_input_proj_pads)))
 
         self.tasks = tasks
+        self.train_tasks = train_tasks
+        self.train_backbone = train_backbone
         self.use_timm_backbone = use_timm_backbone
         self.backbone_config = backbone_config
         self.num_channels = num_channels
@@ -335,6 +341,8 @@ class MultiformerConfig(PretrainedConfig):
         self.det2d_input_proj_groups = det2d_input_proj_groups
         self.det2d_use_pos_embed = det2d_use_pos_embed
         self.det2d_box_keep_prob = det2d_box_keep_prob
+        self.det2d_fuse_semantic = det2d_fuse_semantic
+        self.det2d_fuse_depth = det2d_fuse_depth
         self.encoder_n_points = encoder_n_points
         self.decoder_n_points = decoder_n_points
         self.two_stage = two_stage

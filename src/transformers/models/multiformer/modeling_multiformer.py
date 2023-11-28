@@ -240,6 +240,8 @@ class MultiformerModelOutput(ModelOutput):
     enc_outputs_class: Optional[torch.FloatTensor] = None
     enc_outputs_coord_logits: Optional[torch.FloatTensor] = None
     backbone_features: Tuple[torch.FloatTensor] = None
+    logits_semantic: Optional[torch.FloatTensor] = None
+    predicted_depth: Optional[torch.FloatTensor] = None
 
 
 @dataclass
@@ -1517,6 +1519,19 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
         self.backbone = DeformableDetrConvEncoder(config)
         self.position_embedding = build_position_encoding(config)
 
+        # Segformer semantic segmentation head
+        self.semantic_head = MultiformerSegmentationHead(config)
+
+        # GLPN depth head
+        self.depth_decoder = MultiformerDepthDecoder(config)
+        self.depth_head = MultiformerDepthEstimationHead(config)
+
+        extra_channels = 0
+        if self.config.det2d_fuse_semantic:
+            extra_channels += self.config.backbone_config.num_labels
+        if self.config.det2d_fuse_depth:
+            extra_channels += 3
+
         # Create input projection layers
         input_proj_list = []
         input_proj_parms = zip(
@@ -1529,14 +1544,14 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
             in_channels = self.backbone.intermediate_channel_sizes[level_idx]
             input_proj_list.append(
                 nn.Sequential(
-                    nn.Conv2d(in_channels, config.d_model, kernel_size=kernel, stride=stride, padding=padding),
+                    nn.Conv2d(in_channels + extra_channels, config.d_model, kernel_size=kernel, stride=stride, padding=padding),
                     nn.GroupNorm(config.det2d_input_proj_groups, config.d_model),
                 )
             )
         for _ in range(config.det2d_extra_feature_levels):
             input_proj_list.append(
                 nn.Sequential(
-                    nn.Conv2d(in_channels, config.d_model, kernel_size=3, stride=2, padding=1),
+                    nn.Conv2d(in_channels + extra_channels, config.d_model, kernel_size=3, stride=2, padding=1),
                     nn.GroupNorm(config.det2d_input_proj_groups, config.d_model),
                 )
             )
@@ -1665,6 +1680,7 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        intrinsics: Optional[torch.FloatTensor] = None,
     ) -> Union[Tuple[torch.FloatTensor], MultiformerModelOutput]:
         r"""
         Returns:
@@ -1705,16 +1721,56 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
         # Extract multi-scale feature maps of same resolution `config.d_model` (cf Figure 4 in paper)
         # First, sent pixel_values + pixel_mask through Backbone to obtain the features
         # which is a list of tuples
-        features = self.backbone(pixel_values, pixel_mask)
+        if self.config.train_backbone:
+            features = self.backbone(pixel_values, pixel_mask)
+        else:
+            with torch.no_grad():
+                features = self.backbone(pixel_values, pixel_mask)
 
-        if "det2d" in self.config.tasks:
+        logits_semantic = None
+        predicted_depth = None
+        semantic_fuse = None
+        depth_fuse = None
+
+        if "semseg" in self.config.tasks + self.config.train_tasks or self.config.det2d_fuse_semantic:
+            if "semseg" in self.config.train_tasks:
+                logits_semantic = self.semantic_head([f[0] for f in features])
+            else:
+                with torch.no_grad():
+                    logits_semantic = self.semantic_head([f[0] for f in features])
+        if "depth" in self.config.tasks + self.config.train_tasks or self.config.det2d_fuse_depth:
+            if "depth" in self.config.train_tasks:
+                depth_decoder_out = self.depth_decoder([f[0]for f in features])
+                predicted_depth = self.depth_head(depth_decoder_out)
+            else:
+                with torch.no_grad():
+                    depth_decoder_out = self.depth_decoder([f[0]for f in features])
+                    predicted_depth = self.depth_head(depth_decoder_out)
+        if "det2d" in self.config.tasks + self.config.train_tasks:
             # Then, apply 1x1 convolution to reduce the channel dimension to d_model (256 by default)
             sources = []
             masks = []
-            # position_embeddings_list = [position_embeddings_list[i] for i in self.config.det2d_input_feature_levels]
             position_embeddings_list = []
             for proj_level, feature_level in enumerate(self.config.det2d_input_feature_levels):
                 source, mask = features[feature_level]
+                if logits_semantic is not None and self.config.det2d_fuse_semantic:
+                    semantic_fuse = nn.functional.interpolate(
+                        logits_semantic, size=source.shape[-2:], mode="bilinear", align_corners=False
+                    ).detach() # Do not want to backprop loss from this task head
+                    source = torch.cat([source, semantic_fuse], axis=1)
+                if predicted_depth is not None and self.config.det2d_fuse_depth:
+                    depth_rescale = nn.functional.interpolate(
+                        predicted_depth.unsqueeze(1), size=source.shape[-2:], mode="bilinear", align_corners=False
+                    ).detach()  # Do not want to backprop loss from this task head
+                    h, w = source.shape[-2:]
+                    uv = torch.meshgrid(torch.arange(h), torch.arange(w), indexing="xy")
+                    uv = torch.stack([t.flatten() for t in uv]).repeat(batch_size, 1, 1).to(self.device).transpose(-1, -2)
+                    uv1 = torch.cat([uv, torch.ones(batch_size, h * w, 1)], dim=-1)
+                    # xy_prime = uv - intrinsics[:, :2, 2].unsqueeze(1)
+                    # xy = xy_prime * (depth_rescale.flatten(-2).transpose(-1, -2) / torch.stack([intrinsics[..., i, i] for i in range(2)], dim=1).unsqueeze(1))
+                    # xyz = torch.cat([xy, depth_rescale.flatten(-2).transpose(-1, -2)], dim=-1)
+                    xyz = (torch.linalg.inv(intrinsics) @ uv1.transpose(-1, -2)) * torch.exp(depth_rescale).flatten(-2)
+                    source = torch.cat([source, xyz.reshape(batch_size, 3, h, w)], axis=1)
                 source = self.input_proj[proj_level](source)
                 if self.config.det2d_input_proj_strides[proj_level] > 1:
                     mask = nn.functional.interpolate(pixel_mask[None].float(), size=source.shape[-2:]).to(torch.bool)[0]
@@ -1730,9 +1786,26 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
                 _len_sources = len(sources)
                 for level in range(_len_sources, self.config.num_feature_levels):
                     if level == _len_sources:
-                        source = self.input_proj[level](features[-1][0])
+                        source = features[-1][0]
                     else:
-                        source = self.input_proj[level](sources[-1])
+                        source = sources[-1]
+                    if logits_semantic is not None and self.config.det2d_fuse_semantic:
+                        scale = source.shape[-1] / logits_semantic.shape[-1]
+                        semantic_fuse = nn.functional.interpolate(logits_semantic, scale_factor=scale, mode="bilinear", align_corners=False)
+                    if predicted_depth is not None and self.config.det2d_fuse_depth:
+                        depth_rescale = nn.functional.interpolate(
+                            predicted_depth.unsqueeze(1), size=source.shape[-2:], mode="bilinear", align_corners=False
+                        ).detach()  # Do not want to backprop loss from this task head
+                        h, w = source.shape[-2:]
+                        uv = torch.meshgrid(torch.arange(h), torch.arange(w), indexing="xy")
+                        uv = torch.stack([t.flatten() for t in uv]).repeat(batch_size, 1, 1).to(self.device).transpose(
+                            -1, -2)
+                        uv1 = torch.cat([uv, torch.ones(batch_size, h * w, 1)], dim=-1)
+                        xyz = (torch.linalg.inv(intrinsics) @ uv1.transpose(-1, -2)) * torch.exp(depth_rescale).flatten(-2)
+                        source = torch.cat([source, xyz.reshape(batch_size, 3, h, w)], axis=1)
+                    if any(t is not None for t in [semantic_fuse, depth_fuse]):
+                        source = torch.cat([t for t in [source, semantic_fuse, depth_fuse] if t is not None], dim=-3)
+                    source = self.input_proj[level](source)
                     mask = nn.functional.interpolate(pixel_mask[None].float(), size=source.shape[-2:]).to(torch.bool)[0]
                     pos_l = self.position_embedding(source, mask).to(source.dtype) if self.config.det2d_use_pos_embed else None
                     sources.append(source)
@@ -1863,10 +1936,16 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
                 enc_outputs_class=enc_outputs_class,
                 enc_outputs_coord_logits=enc_outputs_coord_logits,
                 backbone_features=features,
+                logits_semantic=logits_semantic,
+                predicted_depth=predicted_depth,
             )
 
         else:
-            return MultiformerModelOutput(backbone_features=features)
+            return MultiformerModelOutput(
+                backbone_features=features,
+                logits_semantic=logits_semantic,
+                predicted_depth=predicted_depth,
+            )
 
 
 class MultiformerSemanticMLP(SegformerMLP):
@@ -1951,13 +2030,6 @@ class Multiformer(DeformableDetrPreTrainedModel):
 
         # Deformable DETR encoder-decoder model
         self.model = MultiformerModel(config)
-
-        # Segformer semantic segmentation head
-        self.semantic_head = MultiformerSegmentationHead(config)
-
-        # GLPN depth head
-        self.depth_decoder = MultiformerDepthDecoder(config)
-        self.depth_head = MultiformerDepthEstimationHead(config)
 
         # Detection heads on top
         self.class_embed = nn.Linear(config.d_model, config.num_labels)
@@ -2060,6 +2132,11 @@ class Multiformer(DeformableDetrPreTrainedModel):
         ```"""
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        if labels is not None and labels[0].get("intrinsics", None) is not None:
+            intrinsics = torch.cat([l.pop("intrinsics").unsqueeze(0) for l in labels], dim=0).to(self.device)
+        else:
+            intrinsics = None
+
         # First, sent images through DETR base model to obtain encoder + decoder outputs
         outputs = self.model(
             pixel_values,
@@ -2071,13 +2148,15 @@ class Multiformer(DeformableDetrPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            intrinsics=intrinsics,
         )
 
         hidden_states = outputs.intermediate_hidden_states if return_dict else outputs[2]
         init_reference = outputs.init_reference_points if return_dict else outputs[0]
         inter_references = outputs.intermediate_reference_points if return_dict else outputs[3]
 
-        logits, pred_boxes, logits_semantic, predicted_depth = None, None, None, None
+        logits, pred_boxes = None, None
+        # features = tuple(level[0] for level in outputs.backbone_features)
 
         if "det2d" in self.config.tasks:
             # class logits + predicted bounding boxes
@@ -2085,6 +2164,8 @@ class Multiformer(DeformableDetrPreTrainedModel):
             outputs_coords = []
 
             for level in range(hidden_states.shape[1]):
+                if not self.config.auxiliary_loss and level != hidden_states.shape[1] - 1:
+                    continue
                 if level == 0:
                     reference = init_reference
                 else:
@@ -2117,10 +2198,10 @@ class Multiformer(DeformableDetrPreTrainedModel):
             predicted_depth = self.depth_head(depth_decoder_out)
 
         loss = {}
-        if labels_semantic is not None and "semseg" in self.config.tasks:
+        if labels_semantic is not None and "semseg" in self.config.train_tasks:
             # upsample logits to the images' original size
             upsampled_logits = torch.nn.functional.interpolate(
-                logits_semantic, size=labels_semantic.shape[-2:], mode="bilinear", align_corners=False
+                outputs.logits_semantic, size=labels_semantic.shape[-2:], mode="bilinear", align_corners=False
             )
             if self.config.num_labels > 1:
                 loss_fct = CrossEntropyLoss(
@@ -2139,10 +2220,10 @@ class Multiformer(DeformableDetrPreTrainedModel):
 
             loss[MultiformerTask.SEMSEG] = labels_loss
 
-        if labels_depth is not None and "depth" in self.config.tasks:
+        if labels_depth is not None and "depth" in self.config.train_tasks:
             loss_fct = DepthTrainLoss(silog_lambda=self.config.silog_lambda)
             # Labels are converted to log by loss function, model inference is in log depth
-            loss[MultiformerTask.DEPTH] = loss_fct(predicted_depth, labels_depth)
+            loss[MultiformerTask.DEPTH] = loss_fct(outputs.predicted_depth, labels_depth)
 
         # loss, loss_dict, auxiliary_outputs = None, None, None
         loss_dict, auxiliary_outputs = None, None
@@ -2199,8 +2280,8 @@ class Multiformer(DeformableDetrPreTrainedModel):
             loss_dict=loss_dict,
             logits=logits,
             pred_boxes=pred_boxes,
-            logits_semantic=logits_semantic,
-            pred_depth=predicted_depth,
+            logits_semantic=outputs.logits_semantic,
+            pred_depth=outputs.predicted_depth,
             auxiliary_outputs=auxiliary_outputs,
             last_hidden_state=outputs.last_hidden_state,
             decoder_hidden_states=outputs.decoder_hidden_states,
