@@ -1764,13 +1764,13 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
                     ).detach()  # Do not want to backprop loss from this task head
                     h, w = source.shape[-2:]
                     uv = torch.meshgrid(torch.arange(h), torch.arange(w), indexing="xy")
-                    uv = torch.stack([t.flatten() for t in uv]).repeat(batch_size, 1, 1).to(self.device).transpose(-1, -2)
+                    uv = torch.stack([t.flatten() for t in uv]).repeat(batch_size, 1, 1).transpose(-1, -2)
                     uv1 = torch.cat([uv, torch.ones(batch_size, h * w, 1)], dim=-1)
                     # xy_prime = uv - intrinsics[:, :2, 2].unsqueeze(1)
                     # xy = xy_prime * (depth_rescale.flatten(-2).transpose(-1, -2) / torch.stack([intrinsics[..., i, i] for i in range(2)], dim=1).unsqueeze(1))
                     # xyz = torch.cat([xy, depth_rescale.flatten(-2).transpose(-1, -2)], dim=-1)
                     xyz = (torch.linalg.inv(intrinsics) @ uv1.transpose(-1, -2)) * torch.exp(depth_rescale).flatten(-2)
-                    source = torch.cat([source, xyz.reshape(batch_size, 3, h, w)], axis=1)
+                    source = torch.cat([source, xyz.reshape(batch_size, 3, h, w).to(self.device)], axis=1)
                 source = self.input_proj[proj_level](source)
                 if self.config.det2d_input_proj_strides[proj_level] > 1:
                     mask = nn.functional.interpolate(pixel_mask[None].float(), size=source.shape[-2:]).to(torch.bool)[0]
@@ -1798,11 +1798,11 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
                         ).detach()  # Do not want to backprop loss from this task head
                         h, w = source.shape[-2:]
                         uv = torch.meshgrid(torch.arange(h), torch.arange(w), indexing="xy")
-                        uv = torch.stack([t.flatten() for t in uv]).repeat(batch_size, 1, 1).to(self.device).transpose(
+                        uv = torch.stack([t.flatten() for t in uv]).repeat(batch_size, 1, 1).transpose(
                             -1, -2)
                         uv1 = torch.cat([uv, torch.ones(batch_size, h * w, 1)], dim=-1)
                         xyz = (torch.linalg.inv(intrinsics) @ uv1.transpose(-1, -2)) * torch.exp(depth_rescale).flatten(-2)
-                        source = torch.cat([source, xyz.reshape(batch_size, 3, h, w)], axis=1)
+                        source = torch.cat([source, xyz.reshape(batch_size, 3, h, w).to(self.device)], axis=1)
                     if any(t is not None for t in [semantic_fuse, depth_fuse]):
                         source = torch.cat([t for t in [source, semantic_fuse, depth_fuse] if t is not None], dim=-3)
                     source = self.input_proj[level](source)
