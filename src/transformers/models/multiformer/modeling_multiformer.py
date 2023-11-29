@@ -322,6 +322,7 @@ class MultiformerOutput(ModelOutput):
     loss_dict: Optional[Dict] = None
     logits: torch.FloatTensor = None
     pred_boxes: torch.FloatTensor = None
+    pred_boxes_3d: torch.FloatTensor = None
     logits_semantic: torch.FloatTensor = None
     pred_depth: torch.FloatTensor = None
     auxiliary_outputs: Optional[List[Dict]] = None
@@ -2089,6 +2090,7 @@ class Multiformer(DeformableDetrPreTrainedModel):
         inputs_embeds: Optional[torch.FloatTensor] = None,
         decoder_inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[List[dict]] = None,
+        labels_3d: Optional[List[dict]] = None,
         labels_semantic: Optional[torch.LongTensor] = None,
         labels_depth: Optional = None,
         output_attentions: Optional[bool] = None,
@@ -2212,8 +2214,6 @@ class Multiformer(DeformableDetrPreTrainedModel):
 
             outputs_class = torch.stack(outputs_classes)
             logits = outputs_class[-1]
-            pred_boxes = outputs_coord[-1]
-            pred_boxes_3d = outputs_boxes_3d[-1]
 
             if len(outputs_coords_2d) > 0:
                 outputs_coord_2d = torch.stack(outputs_coords_2d)
@@ -2305,7 +2305,8 @@ class Multiformer(DeformableDetrPreTrainedModel):
             loss=loss,
             loss_dict=loss_dict,
             logits=logits,
-            pred_boxes=pred_boxes,
+            pred_boxes=pred_boxes_2d,
+            pred_boxes_3d=pred_boxes_3d,
             logits_semantic=outputs.logits_semantic,
             pred_depth=outputs.predicted_depth,
             auxiliary_outputs=auxiliary_outputs,
