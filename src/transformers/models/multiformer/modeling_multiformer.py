@@ -263,6 +263,15 @@ class MultiformerOutput(ModelOutput):
             values are normalized in [0, 1], relative to the size of each individual image in the batch (disregarding
             possible padding). You can use [`~DeformableDetrProcessor.post_process_object_detection`] to retrieve the
             unnormalized bounding boxes.
+        pred_boxes_3d (`torch.FloatTensor` of shape `(batch_size, num_queries, 7):
+            Each box has 7 elements (dx, dy, dz, h, w, l, phi), which are defined as:
+                dx: normalized offset on x axis from 2D box center on image plane.
+                dy: normalized offset on y axis from 2D box center on image plane.
+                dz: offset of log loss to box center from pixel depth (when box center is occluded by object).
+                phi: heading angle btw [-pi, pi] relative to ego.
+                l: cuboid length
+                w: cuboid width
+                h: cuboid height
         logits_semantic (`torch.FloatTensor` of shape `(batch_size, config.num_labels, logits_height, logits_width)`):
             Classification scores for each pixel.
 
@@ -2162,7 +2171,7 @@ class Multiformer(DeformableDetrPreTrainedModel):
         init_reference = outputs.init_reference_points if return_dict else outputs[0]
         inter_references = outputs.intermediate_reference_points if return_dict else outputs[3]
 
-        logits, pred_boxes = None, None
+        logits, pred_boxes_2d, pred_boxes_3d = None, None, None
         # features = tuple(level[0] for level in outputs.backbone_features)
 
         if any(task in self.config.tasks + self.config.train_tasks for task in ["det2d", "det3d"]):
@@ -2224,79 +2233,102 @@ class Multiformer(DeformableDetrPreTrainedModel):
                 pred_boxes_3d = outputs_boxes_3d[-1]
 
         loss = {}
-        if labels_semantic is not None and "semseg" in self.config.train_tasks:
-            # upsample logits to the images' original size
-            upsampled_logits = torch.nn.functional.interpolate(
-                outputs.logits_semantic, size=labels_semantic.shape[-2:], mode="bilinear", align_corners=False
-            )
-            if self.config.num_labels > 1:
-                loss_fct = CrossEntropyLoss(
-                    ignore_index=self.config.semantic_loss_ignore_index, weight=self.class_loss_weights
-                )
-                labels_loss = loss_fct(upsampled_logits, labels_semantic)
-            elif self.config.num_labels == 1:
-                valid_mask = (
-                    (labels_semantic >= 0) & (labels_semantic != self.config.semantic_loss_ignore_index)
-                ).float()
-                loss_fct = BCEWithLogitsLoss(reduction="none")
-                labels_loss = loss_fct(upsampled_logits.squeeze(1), labels_semantic.float())
-                labels_loss = (labels_loss * valid_mask).mean()
+        if "semseg" in self.config.train_tasks:
+            if labels_semantic is None:
+                warnings.warn("'semseg' is selected as a training task, but no semantic labels loaded for frame.")
             else:
-                raise ValueError(f"Number of labels should be >=0: {self.config.num_labels}")
+                # upsample logits to the images' original size
+                upsampled_logits = torch.nn.functional.interpolate(
+                    outputs.logits_semantic, size=labels_semantic.shape[-2:], mode="bilinear", align_corners=False
+                )
+                if self.config.num_labels > 1:
+                    loss_fct = CrossEntropyLoss(
+                        ignore_index=self.config.semantic_loss_ignore_index, weight=self.class_loss_weights
+                    )
+                    labels_loss = loss_fct(upsampled_logits, labels_semantic)
+                elif self.config.num_labels == 1:
+                    valid_mask = (
+                        (labels_semantic >= 0) & (labels_semantic != self.config.semantic_loss_ignore_index)
+                    ).float()
+                    loss_fct = BCEWithLogitsLoss(reduction="none")
+                    labels_loss = loss_fct(upsampled_logits.squeeze(1), labels_semantic.float())
+                    labels_loss = (labels_loss * valid_mask).mean()
+                else:
+                    raise ValueError(f"Number of labels should be >=0: {self.config.num_labels}")
 
-            loss[MultiformerTask.SEMSEG] = labels_loss
+                loss[MultiformerTask.SEMSEG] = labels_loss
 
-        if labels_depth is not None and "depth" in self.config.train_tasks:
-            loss_fct = DepthTrainLoss(silog_lambda=self.config.silog_lambda)
-            # Labels are converted to log by loss function, model inference is in log depth
-            loss[MultiformerTask.DEPTH] = loss_fct(outputs.predicted_depth, labels_depth)
+        if "depth" in self.config.train_tasks:
+            if labels_depth is None:
+                warnings.warn("'depth' is selected as a training task, but no depth labels loaded for frame.")
+            else:
+                loss_fct = DepthTrainLoss(silog_lambda=self.config.silog_lambda)
+                # Labels are converted to log by loss function, model inference is in log depth
+                loss[MultiformerTask.DEPTH] = loss_fct(outputs.predicted_depth, labels_depth)
 
         # loss, loss_dict, auxiliary_outputs = None, None, None
         loss_dict, auxiliary_outputs = None, None
-        if labels is not None:
-            # First: create the matcher
-            matcher = DeformableDetrHungarianMatcher(
-                class_cost=self.config.class_cost, bbox_cost=self.config.bbox_cost, giou_cost=self.config.giou_cost
-            )
-            # Second: create the criterion
-            losses = ["labels", "boxes", "cardinality"]
-            criterion = DeformableDetrLoss(
-                matcher=matcher,
-                num_classes=self.config.num_labels,
-                focal_alpha=self.config.focal_alpha,
-                losses=losses,
-                keep_box_prob=self.config.det2d_box_keep_prob,
-            )
-            criterion.to(self.device)
-            # Third: compute the losses, based on outputs and labels
-            outputs_loss = {}
-            outputs_loss["logits"] = logits
-            outputs_loss["pred_boxes"] = pred_boxes
-            if self.config.auxiliary_loss:
-                auxiliary_outputs = self._set_aux_loss(outputs_class, outputs_coord)
-                outputs_loss["auxiliary_outputs"] = auxiliary_outputs
-            if self.config.two_stage:
-                enc_outputs_coord = outputs.enc_outputs_coord_logits.sigmoid()
-                outputs_loss["enc_outputs"] = {"logits": outputs.enc_outputs_class, "pred_boxes": enc_outputs_coord}
+        if labels is not None and any(task in self.config.train_tasks for task in ["det2d", "det3d"]):
+            if labels is None:
+                if "det2d" in self.config.train_tasks:
+                    warnings.warn("'det2d' listed as a training task, but no box2d labels loaded for frame.")
+                if "det3d" in self.config.train_tasks:
+                    warnings.warn("'det3d' requires box2d labels to train, but none loaded for frame.")
+            else:
+                # First: create the matcher
+                matcher = DeformableDetrHungarianMatcher(
+                    class_cost=self.config.class_cost, bbox_cost=self.config.bbox_cost, giou_cost=self.config.giou_cost
+                )
+                # Second: create the criterion
+                losses = ["labels", "boxes", "cardinality"]
+                criterion = DeformableDetrLoss(
+                    matcher=matcher,
+                    num_classes=self.config.num_labels,
+                    focal_alpha=self.config.focal_alpha,
+                    losses=losses,
+                    keep_box_prob=self.config.det2d_box_keep_prob,
+                )
+                criterion.to(self.device)
+                # Third: compute the losses, based on outputs and labels
+                outputs_loss = {}
+                outputs_loss["logits"] = logits
+                outputs_loss["pred_boxes"] = pred_boxes_2d
+                if self.config.auxiliary_loss:
+                    auxiliary_outputs = self._set_aux_loss(outputs_class, outputs_coord_2d)
+                    outputs_loss["auxiliary_outputs"] = auxiliary_outputs
+                if self.config.two_stage:
+                    enc_outputs_coord = outputs.enc_outputs_coord_logits.sigmoid()
+                    outputs_loss["enc_outputs"] = {"logits": outputs.enc_outputs_class, "pred_boxes": enc_outputs_coord}
 
-            loss_dict = criterion(outputs_loss, labels)
-            # Fourth: compute total loss, as a weighted sum of the various losses
-            weight_dict = {"loss_ce": 1, "loss_bbox": self.config.bbox_loss_coefficient}
-            weight_dict["loss_giou"] = self.config.giou_loss_coefficient
-            if self.config.auxiliary_loss:
-                aux_weight_dict = {}
-                for i in range(self.config.decoder_layers - 1):
-                    aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})
-                weight_dict.update(aux_weight_dict)
-            loss[MultiformerTask.DET_2D] = sum(
-                loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict
-            )
+                loss_dict, indices = criterion(outputs_loss, labels)
+                # Fourth: compute total loss, as a weighted sum of the various losses
+                weight_dict = {
+                    "loss_ce": 1,
+                    "loss_bbox": self.config.bbox_loss_coefficient,
+                    "loss_giou": self.config.giou_loss_coefficient,
+                }
+                if self.config.auxiliary_loss:
+                    aux_weight_dict = {}
+                    for i in range(self.config.decoder_layers - 1):
+                        aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})
+                    weight_dict.update(aux_weight_dict)
+
+                if "det2d" in self.config.train_tasks:
+                    loss[MultiformerTask.DET_2D] = sum(
+                        loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict
+                    )
+
+                if labels_3d is None and "det3d" in self.config.train_tasks:
+                    warnings.warn("'det3d' listed as training tasks, but no box3d labels found for frame.")
+                else:
+                    loss = MultiformerDet3DLoss(config.)
+
 
         if not return_dict:
             if auxiliary_outputs is not None:
-                output = (logits, pred_boxes) + auxiliary_outputs + outputs
+                output = (logits, pred_boxes_2d) + auxiliary_outputs + outputs
             else:
-                output = (logits, pred_boxes) + outputs
+                output = (logits, pred_boxes_2d) + outputs
             tuple_outputs = ((loss, loss_dict) + output) if loss is not None else output
 
             return tuple_outputs
@@ -2649,7 +2681,7 @@ class DeformableDetrLoss(nn.Module):
                 l_dict = {k + "_enc": v for k, v in l_dict.items()}
                 losses.update(l_dict)
 
-        return losses
+        return losses, indices
 
 
 # Copied from transformers.models.detr.modeling_detr.DetrMLPPredictionHead
