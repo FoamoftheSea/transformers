@@ -2023,7 +2023,7 @@ class MultiformerDepthEstimationHead(GLPNDepthEstimationHead):
 )
 class Multiformer(DeformableDetrPreTrainedModel):
     # When using clones, all layers > 0 will be clones, but layer 0 *is* required
-    _tied_weights_keys = [r"bbox_embed\.[1-9]\d*", r"class_embed\.[1-9]\d*"]
+    _tied_weights_keys = [r"bbox_embed\.[1-9]\d*", r"class_embed\.[1-9]\d*", r"bbox3d_embed\.[1-9]\d*"]
 
     def __init__(self, config: MultiformerConfig):
         super().__init__(config)
@@ -2211,12 +2211,17 @@ class Multiformer(DeformableDetrPreTrainedModel):
                     outputs_boxes_3d.append(output_boxes_3d)
 
             outputs_class = torch.stack(outputs_classes)
-            outputs_coord = torch.stack(outputs_coords_2d)
-            outputs_boxes_3d = torch.stack(outputs_boxes_3d)
-
             logits = outputs_class[-1]
             pred_boxes = outputs_coord[-1]
             pred_boxes_3d = outputs_boxes_3d[-1]
+
+            if len(outputs_coords_2d) > 0:
+                outputs_coord_2d = torch.stack(outputs_coords_2d)
+                pred_boxes_2d = outputs_coord_2d[-1]
+
+            if len(outputs_boxes_3d) > 0:
+                outputs_boxes_3d = torch.stack(outputs_boxes_3d)
+                pred_boxes_3d = outputs_boxes_3d[-1]
 
         loss = {}
         if labels_semantic is not None and "semseg" in self.config.train_tasks:
