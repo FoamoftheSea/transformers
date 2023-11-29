@@ -1769,7 +1769,7 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
                     # xy_prime = uv - intrinsics[:, :2, 2].unsqueeze(1)
                     # xy = xy_prime * (depth_rescale.flatten(-2).transpose(-1, -2) / torch.stack([intrinsics[..., i, i] for i in range(2)], dim=1).unsqueeze(1))
                     # xyz = torch.cat([xy, depth_rescale.flatten(-2).transpose(-1, -2)], dim=-1)
-                    xyz = (torch.linalg.inv(intrinsics) @ uv1.transpose(-1, -2)) * torch.exp(depth_rescale).flatten(-2)
+                    xyz = (torch.linalg.inv(intrinsics) @ uv1.transpose(-1, -2)).to(self.device) * torch.exp(depth_rescale).flatten(-2)
                     source = torch.cat([source, xyz.reshape(batch_size, 3, h, w).to(self.device)], axis=1)
                 source = self.input_proj[proj_level](source)
                 if self.config.det2d_input_proj_strides[proj_level] > 1:
