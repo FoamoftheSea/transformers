@@ -2500,6 +2500,104 @@ class DepthTrainLoss(torch.nn.Module):
         return torch.sum(results)
 
 
+def boxes3d_to_corners3d_torch(boxes3d, flip=False):
+    """
+    :param boxes3d: (N, 7) [x, y, z, h, w, l, ry]
+    :return: corners_rotated: (N, 8, 3)
+    """
+    boxes_num = boxes3d.shape[0]
+    h, w, l, ry = boxes3d[:, 3:4], boxes3d[:, 4:5], boxes3d[:, 5:6], boxes3d[:, 6:7]
+    if flip:
+        ry = ry + torch.pi
+    centers = boxes3d[:, 0:3]
+    zeros = torch.cuda.FloatTensor(boxes_num, 1).fill_(0)
+    ones = torch.cuda.FloatTensor(boxes_num, 1).fill_(1)
+
+    x_corners = torch.cat([l / 2., l / 2., -l / 2., -l / 2., l / 2., l / 2., -l / 2., -l / 2.], dim=1)  # (N, 8)
+    y_corners = torch.cat([zeros, zeros, zeros, zeros, -h, -h, -h, -h], dim=1)  # (N, 8)
+    z_corners = torch.cat([w / 2., -w / 2., -w / 2., w / 2., w / 2., -w / 2., -w / 2., w / 2.], dim=1)  # (N, 8)
+    corners = torch.cat((x_corners.unsqueeze(dim=1), y_corners.unsqueeze(dim=1), z_corners.unsqueeze(dim=1)), dim=1) # (N, 3, 8)
+
+    cosa, sina = torch.cos(ry), torch.sin(ry)
+    raw_1 = torch.cat([cosa, zeros, sina], dim=1)
+    raw_2 = torch.cat([zeros, ones, zeros], dim=1)
+    raw_3 = torch.cat([-sina, zeros, cosa], dim=1)
+    R = torch.cat((raw_1.unsqueeze(dim=1), raw_2.unsqueeze(dim=1), raw_3.unsqueeze(dim=1)), dim=1)  # (N, 3, 3)
+
+    corners_rotated = torch.matmul(R, corners)  # (N, 3, 8)
+    corners_rotated = corners_rotated + centers.unsqueeze(dim=2).expand(-1, -1, 8)
+    corners_rotated = corners_rotated.permute(0, 2, 1)
+    return corners_rotated
+
+
+class MultiformerDet3DLoss(nn.Module):
+
+    def __init__(self, num_heading_bins=12):
+        self.num_heading_bins = num_heading_bins
+
+    def forward(self, boxes, labels):
+        # Taken from https://github.com/xinzhuma/patchnet/blob/fbff77fa6cc9cf108f475a97440d16c5a37a6b9f/lib/losses/patchnet_loss.py
+        center_loss = F.l1_loss(boxes, center_label)
+        heading_class_label = heading_class_label.long()  # label of cross entroy loss shuold be long datatype
+        heading_class_loss = F.cross_entropy(output_dict['heading_scores'], heading_class_label)
+
+        hcls_onehot = torch.zeros(heading_class_label.shape[0], num_heading_bin).cuda().scatter_(
+            dim=1, index=heading_class_label.view(-1, 1), value=1)
+        heading_residual_label = heading_residual_label.float()
+        heading_residual_normalized_label = heading_residual_label / (np.pi / num_heading_bin)
+
+        heading_residual_normalized = torch.sum(output_dict['heading_residuals_normalized'] * hcls_onehot, 1)
+        heading_residual_normalized_loss = F.l1_loss(heading_residual_normalized, heading_residual_normalized_label)
+
+        # Size loss
+        size_class_loss = F.cross_entropy(output_dict['size_scores'], size_class_label.long())
+        scls_onehot = torch.zeros(size_class_label.shape[0], num_size_cluster).cuda().scatter_(
+            dim=1, index=size_class_label.long().view(-1, 1), value=1)
+        scls_onehot = scls_onehot.view(size_class_label.shape[0], num_size_cluster, 1).repeat(1, 1, 3)
+        size_residual_normalized = torch.sum(output_dict['size_residuals_normalized'] * scls_onehot, 1)
+
+        mean_size_label = torch.sum(torch.from_numpy(mean_size_arr).cuda() * scls_onehot, 1)
+        size_residual_label = size_residual_label.float()
+        size_residual_label_normalized = size_residual_label / mean_size_label
+        size_residual_normalized_loss = F.l1_loss(size_residual_label_normalized, size_residual_normalized)
+
+        # Corner loss
+        size_pred = output_dict['size_residuals'] + torch.from_numpy(mean_size_arr).cuda().view(1, -1, 3)
+        size_pred = torch.sum(size_pred * scls_onehot, 1)
+        # true pred heading
+        heading_bin_centers = torch.from_numpy(np.arange(0, 2 * np.pi, 2 * np.pi / num_heading_bin)).cuda().float()
+        heading_pred = output_dict['heading_residuals'] + heading_bin_centers.view(1, -1)
+        heading_pred = torch.sum(heading_pred * hcls_onehot, 1)
+
+        # corners_3d label
+        box3d = torch.cat([center_label, size_label, heading_label.view(-1, 1)], 1)
+
+        box3d_pred = torch.cat([output_dict['center'], size_pred, heading_pred.view(-1, 1)], 1)
+        corners_3d_pred = boxes3d_to_corners3d_torch(box3d_pred)
+
+        # true 3d corners
+        corners_3d_gt = boxes3d_to_corners3d_torch(box3d)
+        corners_3d_gt_flip = boxes3d_to_corners3d_torch(box3d, flip=True)
+        corners_loss = torch.min(F.l1_loss(corners_3d_pred, corners_3d_gt),
+                                 F.l1_loss(corners_3d_pred, corners_3d_gt_flip))
+
+        loss_dict = {
+            "center_l1_loss": center_loss,
+            "heading_class_loss": heading_class_loss,
+            "heading_residual_normalized": heading_residual_normalized_loss,
+            "corners_loss": corners_loss,
+        }
+
+        total_loss = box_loss_weight * (center_loss + \
+                                        heading_class_loss + size_class_loss + \
+                                        heading_residual_normalized_loss * 20 + \
+                                        size_residual_normalized_loss * 20 + \
+                                        stage1_center_loss + \
+                                        corner_loss_weight * corners_loss)
+
+        return total_loss
+
+
 class DeformableDetrLoss(nn.Module):
     """
     This class computes the losses for `DeformableDetrForObjectDetection`. The process happens in two steps: 1) we
