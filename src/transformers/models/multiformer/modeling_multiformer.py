@@ -75,6 +75,7 @@ if is_vision_available():
 
 class MultiformerTask:
     DET_2D = "det_2d"
+    DET_3D = "det_3d"
     SEMSEG = "semseg"
     DEPTH = "depth"
 
@@ -2046,10 +2047,19 @@ class Multiformer(DeformableDetrPreTrainedModel):
         self.bbox_embed = DeformableDetrMLPPredictionHead(
             input_dim=config.d_model, hidden_dim=config.d_model, output_dim=4, num_layers=3
         )
-        # 3D boxes: (dx, dy, dz, phi, l, w, h)
+        # 3D boxes: (n_boxes, 3+2*num_heading_bin+4*num_size_cluster)
         self.bbox3d_embed = DeformableDetrMLPPredictionHead(
-            input_dim=config.d_model, hidden_dim=config.d_model, output_dim=7, num_layers=3
+            input_dim=config.d_model,
+            hidden_dim=config.d_model,
+            output_dim=3 + 2 * config.det3d_num_heading_bins + 4 * config.num_labels,
+            num_layers=3
         )
+
+        self.type_mean_size_array = torch.zeros(size=(config.num_labels, 3))
+        self.type_mean_id_map: Dict[int, int] = {}
+        for i, class_id in enumerate(sorted(config.id2label.keys())):
+            self.type_mean_size_array[i] = torch.tensor(config.det3d_type_mean_sizes[config.id2label[class_id]])
+            self.type_mean_id_map[class_id] = i
 
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
@@ -2215,10 +2225,22 @@ class Multiformer(DeformableDetrPreTrainedModel):
                     uv = outputs_coord_logits.sigmoid() * torch.tensor(pixel_values.transpose(-1, -2).shape[-2:])
                     uv1 = torch.cat([uv, torch.ones_like(uv[..., :1])], dim=-1).to(self.device)
                     xyz = (torch.linalg.inv(intrinsics) @ uv1.transpose(-1, -2)) * torch.exp(z_sample).flatten(-2)
-                    heading_logits = box_output[..., 3]
-                    heading = heading_logits.tanh() * torch.pi
-                    lwh = box_output[..., 4:] * 10  # Model estimates lwh in m/10 to reduce values
-                    output_boxes_3d = torch.cat([xyz.transpose(-1, -2), heading.unsqueeze(-1), lwh], dim=-1)
+                    num_heading_bins = self.config.det3d_num_heading_bins
+                    heading_scores = box_output[..., 3:num_heading_bins+3]
+                    heading_residuals_normalized = box_output[..., num_heading_bins+3:num_heading_bins*2+3]
+                    size_scores = box_output[..., -4*self.config.num_labels:-3*self.config.num_labels]
+                    size_residuals_normalized = box_output[..., -3*self.config.num_labels:]
+                    output_boxes_3d = torch.cat(
+                        tensors=[
+                            xyz.transpose(-1, -2),
+                            heading_scores,
+                            heading_residuals_normalized,
+                            size_scores,
+                            size_residuals_normalized
+                        ],
+                        dim=-1
+                    )
+
                     outputs_boxes_3d.append(output_boxes_3d)
 
             outputs_class = torch.stack(outputs_classes)
@@ -2321,7 +2343,10 @@ class Multiformer(DeformableDetrPreTrainedModel):
                 if labels_3d is None and "det3d" in self.config.train_tasks:
                     warnings.warn("'det3d' listed as training tasks, but no box3d labels found for frame.")
                 else:
-                    ...
+                    criterion_3d = MultiformerDet3DLoss(self.config, self.type_mean_size_array)
+                    total_loss_3d, loss_dict_3d = criterion_3d(pred_boxes_3d, labels_3d, indices)
+                    loss[MultiformerTask.DET_3D] = total_loss_3d
+                    loss_dict.update(loss_dict_3d)
 
         if not return_dict:
             if auxiliary_outputs is not None:
@@ -2510,8 +2535,8 @@ def boxes3d_to_corners3d_torch(boxes3d, flip=False):
     if flip:
         ry = ry + torch.pi
     centers = boxes3d[:, 0:3]
-    zeros = torch.cuda.FloatTensor(boxes_num, 1).fill_(0)
-    ones = torch.cuda.FloatTensor(boxes_num, 1).fill_(1)
+    zeros = torch.FloatTensor(boxes_num, 1).fill_(0)
+    ones = torch.FloatTensor(boxes_num, 1).fill_(1)
 
     x_corners = torch.cat([l / 2., l / 2., -l / 2., -l / 2., l / 2., l / 2., -l / 2., -l / 2.], dim=1)  # (N, 8)
     y_corners = torch.cat([zeros, zeros, zeros, zeros, -h, -h, -h, -h], dim=1)  # (N, 8)
@@ -2532,70 +2557,103 @@ def boxes3d_to_corners3d_torch(boxes3d, flip=False):
 
 class MultiformerDet3DLoss(nn.Module):
 
-    def __init__(self, num_heading_bins=12):
-        self.num_heading_bins = num_heading_bins
+    def __init__(self, config: MultiformerConfig, type_mean_size_array: Tensor, box_loss_weight=1.0, corner_loss_weight=10.0):
+        super().__init__()
+        self.config = config
+        self.type_mean_size_array = type_mean_size_array
+        self.box_loss_weight = box_loss_weight
+        self.corner_loss_weight = corner_loss_weight
 
-    def forward(self, boxes, labels):
-        # Taken from https://github.com/xinzhuma/patchnet/blob/fbff77fa6cc9cf108f475a97440d16c5a37a6b9f/lib/losses/patchnet_loss.py
-        center_loss = F.l1_loss(boxes, center_label)
-        heading_class_label = heading_class_label.long()  # label of cross entroy loss shuold be long datatype
-        heading_class_loss = F.cross_entropy(output_dict['heading_scores'], heading_class_label)
+    def forward(self, boxes, labels, indices):
+        # Adapted from https://github.com/xinzhuma/patchnet/blob/fbff77fa6cc9cf108f475a97440d16c5a37a6b9f/lib/losses/patchnet_loss.py
+        batch_size = len(labels)
+        assert batch_size == boxes.shape[0] == len(indices)
+        center_pred = torch.cat([boxes[i, indices[i][0], :3] for i in range(batch_size)])
+        center_gt = torch.cat([labels[i]["boxes3d"][indices[i][1]][:, :3] for i in range(batch_size)])
+        center_loss = F.l1_loss(center_pred, center_gt)
 
-        hcls_onehot = torch.zeros(heading_class_label.shape[0], num_heading_bin).cuda().scatter_(
+        num_heading_bins = self.config.det3d_num_heading_bins
+
+        # Heading bin classification loss
+        heading_class_pred = torch.cat([boxes[i, indices[i][0], 3:num_heading_bins + 3] for i in range(batch_size)])
+        heading_class_label = torch.cat([labels[i]["heading_class_labels"][indices[i][1]].long() for i in range(batch_size)])
+        heading_class_loss = F.cross_entropy(heading_class_pred, heading_class_label)
+
+        # Normalized heading residual loss
+        hcls_onehot = torch.zeros(heading_class_label.shape[0], num_heading_bins).scatter_(
             dim=1, index=heading_class_label.view(-1, 1), value=1)
-        heading_residual_label = heading_residual_label.float()
-        heading_residual_normalized_label = heading_residual_label / (np.pi / num_heading_bin)
-
-        heading_residual_normalized = torch.sum(output_dict['heading_residuals_normalized'] * hcls_onehot, 1)
+        heading_residual_label = torch.cat([labels[i]["heading_residual_labels"][indices[i][1]] for i in range(batch_size)])
+        # heading_residual_label = heading_residual_label.float()
+        heading_residual_normalized_label = heading_residual_label / (torch.pi / num_heading_bins)
+        heading_residual_normalized_pred = torch.cat([boxes[i, indices[i][0], 3+num_heading_bins:3+2*num_heading_bins] for i in range(batch_size)])
+        heading_residual_normalized = torch.sum(heading_residual_normalized_pred * hcls_onehot, 1)
         heading_residual_normalized_loss = F.l1_loss(heading_residual_normalized, heading_residual_normalized_label)
 
-        # Size loss
-        size_class_loss = F.cross_entropy(output_dict['size_scores'], size_class_label.long())
-        scls_onehot = torch.zeros(size_class_label.shape[0], num_size_cluster).cuda().scatter_(
+        # Size loss. Assumes that each box class has its own size class
+        size_class_label = torch.cat([labels[i]["class_labels"][indices[i][1]] for i in range(batch_size)])
+        size_scores = torch.cat([boxes[i, indices[i][0], -4*self.config.num_labels:-3*self.config.num_labels] for i in range(batch_size)])
+        size_class_loss = F.cross_entropy(size_scores, size_class_label.long())
+        scls_onehot = torch.zeros(size_class_label.shape[0], self.config.num_labels).scatter_(
             dim=1, index=size_class_label.long().view(-1, 1), value=1)
-        scls_onehot = scls_onehot.view(size_class_label.shape[0], num_size_cluster, 1).repeat(1, 1, 3)
-        size_residual_normalized = torch.sum(output_dict['size_residuals_normalized'] * scls_onehot, 1)
+        scls_onehot = scls_onehot.view(size_class_label.shape[0], self.config.num_labels, 1).repeat(1, 1, 3)
+        size_residual_normalized_pred = torch.cat([boxes[i, indices[i][0], -3*self.config.num_labels:] for i in range(batch_size)])
+        size_residual_normalized = torch.sum(size_residual_normalized_pred.view(scls_onehot.shape) * scls_onehot, 1)
 
-        mean_size_label = torch.sum(torch.from_numpy(mean_size_arr).cuda() * scls_onehot, 1)
-        size_residual_label = size_residual_label.float()
+        mean_size_label = torch.sum(self.type_mean_size_array * scls_onehot, 1)
+        size_residual_label = torch.cat([labels[i]["size_residual_labels"][indices[i][1]] for i in range(batch_size)])
         size_residual_label_normalized = size_residual_label / mean_size_label
         size_residual_normalized_loss = F.l1_loss(size_residual_label_normalized, size_residual_normalized)
 
         # Corner loss
-        size_pred = output_dict['size_residuals'] + torch.from_numpy(mean_size_arr).cuda().view(1, -1, 3)
+        size_residuals = size_residual_normalized_pred.view(scls_onehot.shape) * self.type_mean_size_array
+        size_pred = size_residuals + self.type_mean_size_array
         size_pred = torch.sum(size_pred * scls_onehot, 1)
+
         # true pred heading
-        heading_bin_centers = torch.from_numpy(np.arange(0, 2 * np.pi, 2 * np.pi / num_heading_bin)).cuda().float()
-        heading_pred = output_dict['heading_residuals'] + heading_bin_centers.view(1, -1)
+        heading_bin_centers = torch.arange(0, 2 * torch.pi, 2 * torch.pi / num_heading_bins)
+        heading_pred = heading_residual_normalized_pred * (torch.pi / num_heading_bins) + heading_bin_centers
         heading_pred = torch.sum(heading_pred * hcls_onehot, 1)
 
-        # corners_3d label
-        box3d = torch.cat([center_label, size_label, heading_label.view(-1, 1)], 1)
+        # true heading label
+        heading_label = heading_residual_label.view(-1, 1) + heading_bin_centers.view(1, -1)
+        heading_label = torch.sum(hcls_onehot * heading_label, -1)
 
-        box3d_pred = torch.cat([output_dict['center'], size_pred, heading_pred.view(-1, 1)], 1)
+        # size true label
+        size_label = torch.sum(self.type_mean_size_array * scls_onehot, 1) + size_residual_label
+        size_label = size_label.float()
+
+        # corners_3d estimate
+        box3d_pred = torch.cat([center_pred, size_pred, heading_pred.view(-1, 1)], 1)
         corners_3d_pred = boxes3d_to_corners3d_torch(box3d_pred)
 
         # true 3d corners
+        box3d = torch.cat([center_gt, size_label, heading_label.view(-1, 1)], 1)
         corners_3d_gt = boxes3d_to_corners3d_torch(box3d)
         corners_3d_gt_flip = boxes3d_to_corners3d_torch(box3d, flip=True)
+
+        # corner loss
         corners_loss = torch.min(F.l1_loss(corners_3d_pred, corners_3d_gt),
                                  F.l1_loss(corners_3d_pred, corners_3d_gt_flip))
 
         loss_dict = {
-            "center_l1_loss": center_loss,
-            "heading_class_loss": heading_class_loss,
-            "heading_residual_normalized": heading_residual_normalized_loss,
-            "corners_loss": corners_loss,
+            "box3d_center_l1_loss": center_loss,
+            "box3d_heading_class_loss": heading_class_loss,
+            "box3d_heading_residual_loss": heading_residual_normalized_loss,
+            "box3d_size_class_loss": size_class_loss,
+            "box3d_size_residual_loss": size_residual_normalized_loss,
+            "box3d_corners_loss": corners_loss,
         }
 
-        total_loss = box_loss_weight * (center_loss + \
-                                        heading_class_loss + size_class_loss + \
-                                        heading_residual_normalized_loss * 20 + \
-                                        size_residual_normalized_loss * 20 + \
-                                        stage1_center_loss + \
-                                        corner_loss_weight * corners_loss)
+        total_loss = self.box_loss_weight * (
+                center_loss +
+                heading_class_loss + size_class_loss +
+                heading_residual_normalized_loss * 20 +
+                size_residual_normalized_loss * 20 +
+                # stage1_center_loss + \
+                self.corner_loss_weight * corners_loss
+        )
 
-        return total_loss
+        return total_loss, loss_dict
 
 
 class DeformableDetrLoss(nn.Module):

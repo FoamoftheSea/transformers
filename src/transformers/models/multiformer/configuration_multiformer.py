@@ -223,6 +223,8 @@ class MultiformerConfig(PretrainedConfig):
         det2d_box_keep_prob=0.5,
         det2d_fuse_semantic=False,
         det2d_fuse_depth=False,
+        det3d_num_heading_bins=12,
+        det3d_type_mean_sizes=None,
         encoder_n_points=4,
         decoder_n_points=4,
         two_stage=False,
@@ -343,6 +345,8 @@ class MultiformerConfig(PretrainedConfig):
         self.det2d_box_keep_prob = det2d_box_keep_prob
         self.det2d_fuse_semantic = det2d_fuse_semantic
         self.det2d_fuse_depth = det2d_fuse_depth
+        self.det3d_num_heading_bins = det3d_num_heading_bins
+        self.det3d_type_mean_sizes = det3d_type_mean_sizes if det3d_type_mean_sizes is not None else {l: [1, 1, 1] for l in self.label2id.keys()}
         self.encoder_n_points = encoder_n_points
         self.decoder_n_points = decoder_n_points
         self.two_stage = two_stage
