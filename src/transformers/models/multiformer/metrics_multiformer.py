@@ -1,11 +1,12 @@
 from collections import Counter
-from typing import Dict, Optional, Set, List
+from typing import Dict, Optional, Set
 
 import numpy as np
 import torch
+from shift_lab.tools.kitti_object_eval_python.eval import get_shift_coco_eval_result
 from torchmetrics.detection import MeanAveragePrecision
 
-from transformers import EvalPrediction
+from transformers import EvalPrediction, MultiformerConfig
 from transformers.models.multiformer.image_processing_multiformer import post_process_object_detection
 from transformers.models.multiformer.modeling_multiformer import IRMSELoss, MultiformerTask, SiLogLoss
 
@@ -63,6 +64,73 @@ class MultiformerSemanticEvalMetric:
         return metrics
 
 
+class MultiformerDet3DEvalMetric:
+    def __init__(self, config: MultiformerConfig):
+        self.gt_annos = []
+        self.dt_annos = []
+        self.config = config
+        self.num_heading_bins = config.det3d_num_heading_bins
+        self.type_mean_size_array = np.zeros((config.num_labels, 3))
+        self.type_mean_id_map: Dict[int, int] = {}
+        for i, class_id in enumerate(sorted(config.id2label.keys())):
+            self.type_mean_size_array[i] = np.array(config.det3d_type_mean_sizes[config.id2label[class_id]])
+            self.type_mean_id_map[class_id] = i
+
+    def update(self, preds, target):
+        for batch_item in preds:
+            boxes3d = batch_item["boxes3d"]
+            # Convert heading to radians
+            heading_class_scores = boxes3d[:, 3:self.num_heading_bins + 3]
+            heading_class_pred = heading_class_scores.argmax(-1)
+            hcls_onehot = np.zeros((heading_class_pred.shape[0], self.num_heading_bins))
+            hcls_onehot[np.arange(hcls_onehot.shape[0]), heading_class_pred] = 1
+            heading_residual_normalized_pred = boxes3d[:, self.num_heading_bins + 3:self.num_heading_bins*2 + 3]
+            heading_bin_centers = np.arange(0, 2 * np.pi, 2 * np.pi / self.num_heading_bins)
+            heading_pred = heading_residual_normalized_pred * (np.pi / self.num_heading_bins) + heading_bin_centers
+            heading_pred = np.sum(heading_pred * hcls_onehot, 1)
+
+            # Get dimensions in meters
+            if self.config.det3d_predict_class:
+                size_class_scores = boxes3d[:, -4*self.config.num_labels:-3*self.config.num_labels]
+                size_class_preds = size_class_scores.argmax(-1)
+            else:
+                size_class_preds = boxes3d[:, -1].astype(np.int64)
+                boxes3d = boxes3d[:, :-1]
+            scls_onehot = np.zeros((size_class_preds.shape[0], self.config.num_labels))
+            scls_onehot[np.arange(scls_onehot.shape[0]), size_class_preds] = 1
+            scls_onehot = scls_onehot.reshape(size_class_preds.shape[0], self.config.num_labels, 1).repeat(3, -1)
+            size_residual_normalized_pred = boxes3d[:, -3*self.config.num_labels:]
+            size_residuals_pred = size_residual_normalized_pred.reshape(scls_onehot.shape) * self.type_mean_size_array
+            size_pred = size_residuals_pred + self.type_mean_size_array
+            size_pred = np.sum(size_pred * scls_onehot, 1)
+
+            self.dt_annos.append(
+                {
+                    "name": [self.config.id2label[class_id] for class_id in size_class_preds],
+                    "bbox": batch_item["boxes2d"].detach().cpu().numpy(),
+                    "score": batch_item["score"],
+                    "location": boxes3d[:, :3],
+                    "dimensions": size_pred,
+                    "rotation_y": heading_pred,
+                }
+            )
+        for batch_item in target:
+            self.gt_annos.append(
+                {
+                    "name": [self.config.id2label[class_id] for class_id in batch_item["class_labels"]],
+                    "bbox": batch_item["boxes2d"].detach().cpu().numpy(),
+                    "location": batch_item["boxes3d"][:, :3],
+                    "dimensions": batch_item["boxes3d"][:, 3:6],
+                    "rotation_y": batch_item["boxes3d"][:, -2],
+                }
+            )
+
+    def compute(self):
+        result, log_dict = get_shift_coco_eval_result(self.gt_annos, self.dt_annos, list(self.config.label2id.keys()))
+
+        return log_dict
+
+
 class MultiformerDepthEvalMetric:
     def __init__(self, silog_lambda=0.5, log_predictions=True, log_labels=False, mask_value=0.0):
         self.batch_mae = []
@@ -102,13 +170,14 @@ class MultiformerDepthEvalMetric:
 class MultiformerMetric:
     def __init__(
         self,
-        tasks: List[str] = ["det2d", "semseg", "depth"],
+        config: MultiformerConfig,
         id2label: Optional[Dict[int, str]] = None,
         ignore_class_ids: Optional[Set[int]] = None,
         reduced_labels: bool = False,
         box_score_threshold: float = 0.5,
     ):
-        self.tasks = tasks
+        self.config = config
+        self.tasks = config.tasks
         self.id2label = id2label
         self.ignore_class_ids = ignore_class_ids
         self.reduced_labels = reduced_labels
@@ -120,6 +189,8 @@ class MultiformerMetric:
         self.metrics = {}
         if "det2d" in self.tasks:
             self.metrics["det_2d"] = MeanAveragePrecision()
+        if "det3d" in self.tasks:
+            self.metrics["det_3d"] = MultiformerDet3DEvalMetric(self.config)
         if "semseg" in self.tasks:
             self.metrics["semseg"] = MultiformerSemanticEvalMetric(
                 id2label=self.id2label, ignore_class_ids=self.ignore_class_ids, reduced_labels=self.reduced_labels
@@ -153,6 +224,26 @@ class MultiformerMetric:
         elif task == MultiformerTask.SEMSEG:
             preds = eval_pred.predictions["logits_semantic"]
             target = eval_pred.label_ids["labels_semantic"]
+        elif task == MultiformerTask.DET_3D:
+            target_sizes = [eval_pred.inputs[i, 0].shape for i in range(eval_pred.inputs.shape[0])]
+            preds_3d = eval_pred.predictions["pred_boxes_3d"]
+            if not self.config.det3d_predict_class:
+                preds_3d = np.concatenate([preds_3d, eval_pred.predictions["logits"].argmax(-1)[..., None]], axis=-1)
+            preds_2d = post_process_object_detection(
+                eval_pred.predictions, threshold=0.0, target_sizes=target_sizes, top_k=300
+            )
+            scores = eval_pred.predictions["logits"].max(-1)
+            preds = []
+            for pred_3d, pred_2d, score in zip(preds_3d, preds_2d, scores):
+                preds.append({"boxes3d": pred_3d, "boxes2d": pred_2d["boxes"], "score": score})
+            target = eval_pred.label_ids["labels_3d"]
+            for i, t in enumerate(target):
+                t["boxes2d"] = post_process_object_detection(
+                    eval_pred.label_ids["labels"][i]["boxes"][None, ...],
+                    threshold=self.box_score_threshold,
+                    target_sizes=[target_sizes[i]],
+                    boxes_only=True,
+                )[0]["boxes"]
         else:
             preds = eval_pred.predictions["pred_depth"]
             target = eval_pred.label_ids["labels_depth"]

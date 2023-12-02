@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Deformable DETR model configuration"""
+"""Multiformer model configuration"""
 from typing import Sequence
 
 from ... import PvtV2Config
@@ -225,6 +225,7 @@ class MultiformerConfig(PretrainedConfig):
         det2d_fuse_depth=False,
         det3d_num_heading_bins=12,
         det3d_type_mean_sizes=None,
+        det3d_predict_class=False,
         encoder_n_points=4,
         decoder_n_points=4,
         two_stage=False,
@@ -347,6 +348,7 @@ class MultiformerConfig(PretrainedConfig):
         self.det2d_fuse_depth = det2d_fuse_depth
         self.det3d_num_heading_bins = det3d_num_heading_bins
         self.det3d_type_mean_sizes = det3d_type_mean_sizes if det3d_type_mean_sizes is not None else {l: [1, 1, 1] for l in self.label2id.keys()}
+        self.det3d_predict_class = det3d_predict_class
         self.encoder_n_points = encoder_n_points
         self.decoder_n_points = decoder_n_points
         self.two_stage = two_stage
