@@ -347,7 +347,6 @@ class MultiformerConfig(PretrainedConfig):
         self.det2d_fuse_semantic = det2d_fuse_semantic
         self.det2d_fuse_depth = det2d_fuse_depth
         self.det3d_num_heading_bins = det3d_num_heading_bins
-        self.det3d_type_mean_sizes = det3d_type_mean_sizes if det3d_type_mean_sizes is not None else {l: [1, 1, 1] for l in self.label2id.keys()}
         self.det3d_predict_class = det3d_predict_class
         self.encoder_n_points = encoder_n_points
         self.decoder_n_points = decoder_n_points
@@ -370,6 +369,7 @@ class MultiformerConfig(PretrainedConfig):
         self.disable_custom_kernels = disable_custom_kernels
         self.frozen_batch_norm = frozen_batch_norm
         super().__init__(is_encoder_decoder=is_encoder_decoder, **kwargs)
+        self.det3d_type_mean_sizes = det3d_type_mean_sizes if det3d_type_mean_sizes is not None else {l: [1, 1, 1] for l in self.id2label.values()}
 
     @property
     def num_attention_heads(self) -> int:

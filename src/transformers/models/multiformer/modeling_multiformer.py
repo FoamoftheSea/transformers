@@ -2225,7 +2225,7 @@ class Multiformer(DeformableDetrPreTrainedModel):
                     z_sample += z_offset
                     uv = outputs_coord_logits.sigmoid() * torch.tensor(pixel_values.transpose(-1, -2).shape[-2:]).to(self.device)
                     uv1 = torch.cat([uv, torch.ones_like(uv[..., :1])], dim=-1)
-                    xyz = (torch.linalg.inv(intrinsics) @ uv1.transpose(-1, -2)) * torch.exp(z_sample).flatten(-2)
+                    xyz = (torch.linalg.inv(intrinsics) @ uv1.transpose(-1, -2)) * torch.exp(z_sample).transpose(-1, -2)
                     num_heading_bins = self.config.det3d_num_heading_bins
                     heading_scores = box_output[..., 3:num_heading_bins+3]
                     heading_residuals_normalized = box_output[..., num_heading_bins+3:num_heading_bins*2+3]
