@@ -16,6 +16,7 @@
 
 
 import inspect
+import tempfile
 import unittest
 
 from transformers import PvtV2Backbone, PvtV2Config, is_torch_available, is_vision_available
@@ -37,7 +38,7 @@ from ...test_pipeline_mixin import PipelineTesterMixin
 if is_torch_available():
     import torch
 
-    from transformers import MODEL_MAPPING, PvtV2ForImageClassification, PvtV2ImageProcessor, PvtV2Model
+    from transformers import MODEL_MAPPING, AutoImageProcessor, PvtV2ForImageClassification, PvtV2Model
     from transformers.models.pvt_v2.modeling_pvt_v2 import PVT_V2_PRETRAINED_MODEL_ARCHIVE_LIST
 
 
@@ -52,7 +53,7 @@ class PvtV2ConfigTester(ConfigTester):
         self.parent.assertTrue(hasattr(config, "num_encoder_blocks"))
 
 
-class PvtV2ModelTester:
+class PvtV2ModelTester(ModelTesterMixin):
     def __init__(
         self,
         parent,
@@ -77,7 +78,7 @@ class PvtV2ModelTester:
     ):
         self.parent = parent
         self.batch_size = batch_size
-        self.image_size = {"height": 64, "width": 64} if image_size is None else image_size
+        self.image_size = 64 if image_size is None else image_size
         self.num_channels = num_channels
         self.num_encoder_blocks = num_encoder_blocks
         self.sr_ratios = sr_ratios
@@ -107,7 +108,7 @@ class PvtV2ModelTester:
 
     def get_config(self):
         return PvtV2Config(
-            image_size={"height": self.image_size, "width": self.image_size},
+            image_size=self.image_size,
             num_channels=self.num_channels,
             num_encoder_blocks=self.num_encoder_blocks,
             depths=self.depths,
@@ -222,6 +223,17 @@ class PvtV2ModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
     def test_model_common_attributes(self):
         pass
 
+    @unittest.skip(reason="This architecture does not work with using reentrant.")
+    def test_training_gradient_checkpointing(self):
+        # Scenario - 1 default behaviour
+        self.check_training_gradient_checkpointing()
+
+    @unittest.skip(reason="This architecture does not work with using reentrant.")
+    def test_training_gradient_checkpointing_use_reentrant(self):
+        # Scenario - 2 with `use_reentrant=True` - this is the default value that is used in pytorch's
+        # torch.utils.checkpoint.checkpoint
+        self.check_training_gradient_checkpointing(gradient_checkpointing_kwargs={"use_reentrant": True})
+
     def test_initialization(self):
         config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
 
@@ -310,7 +322,7 @@ class PvtV2ModelIntegrationTest(unittest.TestCase):
     @slow
     def test_inference_image_classification(self):
         # only resize + normalize
-        image_processor = PvtV2ImageProcessor.from_pretrained("FoamoftheSea/pvt_v2_b0")
+        image_processor = AutoImageProcessor.from_pretrained("FoamoftheSea/pvt_v2_b0")
         model = PvtV2ForImageClassification.from_pretrained("FoamoftheSea/pvt_v2_b0").to(torch_device).eval()
 
         image = prepare_img()
@@ -331,7 +343,7 @@ class PvtV2ModelIntegrationTest(unittest.TestCase):
     def test_inference_model(self):
         model = PvtV2Model.from_pretrained("FoamoftheSea/pvt_v2_b0").to(torch_device).eval()
 
-        image_processor = PvtV2ImageProcessor.from_pretrained("FoamoftheSea/pvt_v2_b0")
+        image_processor = AutoImageProcessor.from_pretrained("FoamoftheSea/pvt_v2_b0")
         image = prepare_img()
         inputs = image_processor(images=image, return_tensors="pt")
         pixel_values = inputs.pixel_values.to(torch_device)
@@ -359,7 +371,7 @@ class PvtV2ModelIntegrationTest(unittest.TestCase):
         """
         model = PvtV2ForImageClassification.from_pretrained("FoamoftheSea/pvt_v2_b0", torch_dtype=torch.float16)
         model.to(torch_device)
-        image_processor = PvtV2ImageProcessor(size={"height": 224, "width": 224})
+        image_processor = AutoImageProcessor.from_pretrained("FoamoftheSea/pvt_v2_b0")
 
         image = prepare_img()
         inputs = image_processor(images=image, return_tensors="pt")
@@ -411,6 +423,20 @@ class PvtV2BackboneTest(BackboneTesterMixin, unittest.TestCase):
         # Error raised when out_indices do not correspond to out_features
         with self.assertRaises(ValueError):
             config = config_class(out_features=["stage1", "stage2"], out_indices=[0, 2])
+
+    def test_config_save_pretrained(self):
+        config_class = self.config_class
+        config_first = config_class(out_indices=[0, 1, 2, 3])
+
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            config_first.save_pretrained(tmpdirname)
+            config_second = self.config_class.from_pretrained(tmpdirname)
+
+        # Fix issue where type switches in the saving process
+        if isinstance(config_second.image_size, list):
+            config_second.image_size = tuple(config_second.image_size)
+
+        self.assertEqual(config_second.to_dict(), config_first.to_dict())
 
     def setUp(self):
         self.model_tester = PvtV2ModelTester(self)
