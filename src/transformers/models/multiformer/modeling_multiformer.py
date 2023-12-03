@@ -1743,21 +1743,21 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
         semantic_fuse = None
         depth_fuse = None
 
-        if "semseg" in self.config.tasks + self.config.train_tasks or self.config.det2d_fuse_semantic:
-            if "semseg" in self.config.train_tasks:
+        if MultiformerTask.SEMSEG in self.config.tasks + self.config.train_tasks or self.config.det2d_fuse_semantic:
+            if MultiformerTask.SEMSEG in self.config.train_tasks:
                 logits_semantic = self.semantic_head([f[0] for f in features])
             else:
                 with torch.no_grad():
                     logits_semantic = self.semantic_head([f[0] for f in features])
-        if "depth" in self.config.tasks + self.config.train_tasks or self.config.det2d_fuse_depth:
-            if "depth" in self.config.train_tasks:
+        if MultiformerTask.DEPTH in self.config.tasks + self.config.train_tasks or self.config.det2d_fuse_depth:
+            if MultiformerTask.DEPTH in self.config.train_tasks:
                 depth_decoder_out = self.depth_decoder([f[0]for f in features])
                 predicted_depth = self.depth_head(depth_decoder_out)
             else:
                 with torch.no_grad():
                     depth_decoder_out = self.depth_decoder([f[0]for f in features])
                     predicted_depth = self.depth_head(depth_decoder_out)
-        if "det2d" in self.config.tasks + self.config.train_tasks:
+        if MultiformerTask.DET_2D in self.config.tasks + self.config.train_tasks:
             # Then, apply 1x1 convolution to reduce the channel dimension to d_model (256 by default)
             sources = []
             masks = []
@@ -2185,7 +2185,7 @@ class Multiformer(DeformableDetrPreTrainedModel):
         logits, pred_boxes_2d, pred_boxes_3d = None, None, None
         # features = tuple(level[0] for level in outputs.backbone_features)
 
-        if any(task in self.config.tasks + self.config.train_tasks for task in ["det2d", "det3d"]):
+        if any(task in self.config.tasks + self.config.train_tasks for task in [MultiformerTask.DET_2D, MultiformerTask.DET_3D]):
             # class logits + predicted bounding boxes
             outputs_classes = []
             outputs_coords_2d = []
@@ -2202,7 +2202,7 @@ class Multiformer(DeformableDetrPreTrainedModel):
                 outputs_class = self.class_embed[level](hidden_states[:, level])
                 outputs_classes.append(outputs_class)
 
-                if "det2d" in self.config.tasks + self.config.train_tasks:
+                if MultiformerTask.DET_2D in self.config.tasks + self.config.train_tasks:
                     delta_bbox = self.bbox_embed[level](hidden_states[:, level])
                     if reference.shape[-1] == 4:
                         outputs_coord_logits = delta_bbox + reference
@@ -2214,7 +2214,7 @@ class Multiformer(DeformableDetrPreTrainedModel):
                     outputs_coord_2d = outputs_coord_logits.sigmoid()
                     outputs_coords_2d.append(outputs_coord_2d)
 
-                if "det3d" in self.config.tasks + self.config.train_tasks:
+                if MultiformerTask.DET_3D in self.config.tasks + self.config.train_tasks:
                     box_output = self.bbox3d_embed[level](hidden_states[:, level])
                     outputs_coord_logits = box_output[..., :2] + reference
                     outputs_coord_2d = outputs_coord_logits.tanh()
@@ -2291,11 +2291,11 @@ class Multiformer(DeformableDetrPreTrainedModel):
 
         # loss, loss_dict, auxiliary_outputs = None, None, None
         loss_dict, auxiliary_outputs = None, None
-        if labels is not None and any(task in self.config.train_tasks for task in ["det2d", "det3d"]):
+        if labels is not None and any(task in self.config.train_tasks for task in [MultiformerTask.DET_2D, MultiformerTask.DET_3D]):
             if labels is None:
-                if "det2d" in self.config.train_tasks:
+                if MultiformerTask.DET_2D in self.config.train_tasks:
                     warnings.warn("'det2d' listed as a training task, but no box2d labels loaded for frame.")
-                if "det3d" in self.config.train_tasks:
+                if MultiformerTask.DET_3D in self.config.train_tasks:
                     warnings.warn("'det3d' requires box2d labels to train, but none loaded for frame.")
             else:
                 # First: create the matcher
@@ -2336,18 +2336,19 @@ class Multiformer(DeformableDetrPreTrainedModel):
                         aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})
                     weight_dict.update(aux_weight_dict)
 
-                if "det2d" in self.config.train_tasks:
+                if MultiformerTask.DET_2D in self.config.train_tasks:
                     loss[MultiformerTask.DET_2D] = sum(
                         loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict
                     )
 
-                if labels_3d is None and "det3d" in self.config.train_tasks:
-                    warnings.warn("'det3d' listed as training tasks, but no box3d labels found for frame.")
-                else:
-                    criterion_3d = MultiformerDet3DLoss(self.config, self.type_mean_size_array)
-                    total_loss_3d, loss_dict_3d = criterion_3d(pred_boxes_3d, labels_3d, indices)
-                    loss[MultiformerTask.DET_3D] = total_loss_3d
-                    loss_dict.update(loss_dict_3d)
+                if MultiformerTask.DET_3D in self.config.train_tasks:
+                    if labels_3d is None:
+                        warnings.warn("'det3d' listed as training tasks, but no box3d labels found for frame.")
+                    else:
+                        criterion_3d = MultiformerDet3DLoss(self.config, self.type_mean_size_array)
+                        total_loss_3d, loss_dict_3d = criterion_3d(pred_boxes_3d, labels_3d, indices)
+                        loss[MultiformerTask.DET_3D] = total_loss_3d
+                        loss_dict.update(loss_dict_3d)
 
         if not return_dict:
             if auxiliary_outputs is not None:

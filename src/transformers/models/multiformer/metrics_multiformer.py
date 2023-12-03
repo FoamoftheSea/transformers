@@ -187,16 +187,16 @@ class MultiformerMetric:
 
     def reset_metrics(self):
         self.metrics = {}
-        if "det2d" in self.tasks:
-            self.metrics["det_2d"] = MeanAveragePrecision()
-        if "det3d" in self.tasks:
-            self.metrics["det_3d"] = MultiformerDet3DEvalMetric(self.config)
-        if "semseg" in self.tasks:
-            self.metrics["semseg"] = MultiformerSemanticEvalMetric(
+        if MultiformerTask.DET_2D in self.tasks:
+            self.metrics[MultiformerTask.DET_2D] = MeanAveragePrecision()
+        if MultiformerTask.DET_3D in self.tasks:
+            self.metrics[MultiformerTask.DET_3D] = MultiformerDet3DEvalMetric(self.config)
+        if MultiformerTask.SEMSEG in self.tasks:
+            self.metrics[MultiformerTask.SEMSEG] = MultiformerSemanticEvalMetric(
                 id2label=self.id2label, ignore_class_ids=self.ignore_class_ids, reduced_labels=self.reduced_labels
             )
-        if "depth" in self.tasks:
-            self.metrics["depth"] = MultiformerDepthEvalMetric()
+        if MultiformerTask.DEPTH in self.tasks:
+            self.metrics[MultiformerTask.DEPTH] = MultiformerDepthEvalMetric()
 
     def convert_eval_pred(self, eval_pred, task):
         if task == MultiformerTask.DET_2D:
@@ -259,7 +259,7 @@ class MultiformerMetric:
 
     def compute(self):
         output = {task: metric.compute() for task, metric in self.metrics.items()}
-        if output.get("det_2d", None) is not None:
-            output["det_2d"]["classes"] = output["det_2d"].pop("classes").tolist()
+        if output.get(MultiformerTask.DET_2D, None) is not None:
+            output[MultiformerTask.DET_2D]["classes"] = output[MultiformerTask.DET_2D].pop("classes").tolist()
         self.reset_metrics()
         return output
