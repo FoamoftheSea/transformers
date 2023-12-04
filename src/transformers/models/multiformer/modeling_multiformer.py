@@ -2223,7 +2223,10 @@ class Multiformer(DeformableDetrPreTrainedModel):
                     center_coord_logits = box_output[..., :2] + reference
                     z_offset = box_output[..., 2].unsqueeze(-1)
                     z_sample = nn.functional.grid_sample(
-                        outputs.predicted_depth.unsqueeze(1), center_coord_logits.flip(-1).tanh().unsqueeze(-2), align_corners=False
+                        outputs.predicted_depth.unsqueeze(1),
+                        center_coord_logits.tanh().unsqueeze(-2),
+                        align_corners=False,
+                        padding_mode="reflection",
                     ).squeeze(1)
                     center_coord_2d = center_coord_logits.sigmoid()
                     z_sample += z_offset
