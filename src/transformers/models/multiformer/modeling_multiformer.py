@@ -2223,7 +2223,7 @@ class Multiformer(DeformableDetrPreTrainedModel):
                     center_coord_logits = box_output[..., :2] + reference
                     z_offset = box_output[..., 2].unsqueeze(-1)
                     z_sample = nn.functional.grid_sample(
-                        outputs.predicted_depth.unsqueeze(1), center_coord_logits.tanh().unsqueeze(-2), align_corners=False
+                        outputs.predicted_depth.unsqueeze(1), center_coord_logits.flip(-1).tanh().unsqueeze(-2), align_corners=False
                     ).squeeze(1)
                     center_coord_2d = center_coord_logits.sigmoid()
                     z_sample += z_offset
@@ -2351,8 +2351,8 @@ class Multiformer(DeformableDetrPreTrainedModel):
                         warnings.warn("'det3d' listed as training tasks, but no box3d labels found for frame.")
                     else:
                         criterion_3d = MultiformerDet3DLoss(self.config, self.type_mean_size_array)
-                        image_size = torch.cat([pixel_mask.sum(-2)[:, -1:], pixel_mask.sum(-1)[:, -1:]], -1)
-                        total_loss_3d, loss_dict_3d = criterion_3d(pred_boxes_3d, labels_3d, indices, intrinsics, image_size)
+                        image_size_wh = torch.cat([pixel_mask.sum(-1)[:, -1:], pixel_mask.sum(-2)[:, -1:]], -1)
+                        total_loss_3d, loss_dict_3d = criterion_3d(pred_boxes_3d, labels_3d, indices, intrinsics, image_size_wh)
                         loss[MultiformerTask.DET_3D] = total_loss_3d
                         loss_dict.update(loss_dict_3d)
 
@@ -2573,7 +2573,7 @@ class MultiformerDet3DLoss(nn.Module):
         self.box_loss_weight = box_loss_weight
         self.corner_loss_weight = corner_loss_weight
 
-    def forward(self, boxes, labels_3d, indices, intrinsics, image_size):
+    def forward(self, boxes, labels_3d, indices, intrinsics, image_size_wh):
         # Adapted from https://github.com/xinzhuma/patchnet/blob/fbff77fa6cc9cf108f475a97440d16c5a37a6b9f/lib/losses/patchnet_loss.py
         batch_size = len(labels_3d)
         assert batch_size == boxes.shape[0] == len(indices)
@@ -2586,7 +2586,7 @@ class MultiformerDet3DLoss(nn.Module):
         center_2d_pred = torch.cat([boxes[i, indices[i][0], :2] for i in range(batch_size)])
         center_2d_label = torch.cat(
             [
-                (intrinsics[i] @ labels_3d[i]["boxes3d"][indices[i][1]][:, :3].T).T[..., :2] / image_size[i]
+                (intrinsics[i] @ labels_3d[i]["boxes3d"][indices[i][1]][:, :3].T).T[..., :2] / image_size_wh[i]
                 for i in range(batch_size)
             ]
         ) / center_gt[:, 2, None]
