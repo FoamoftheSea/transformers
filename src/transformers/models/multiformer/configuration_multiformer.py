@@ -176,8 +176,8 @@ class MultiformerConfig(PretrainedConfig):
 
     def __init__(
         self,
-        tasks=["semseg", "depth", "det2d"],
-        train_tasks=["semseg", "depth", "det2d"],
+        tasks=["semseg", "depth", "det_2d"],
+        train_tasks=["semseg", "depth", "det_2d"],
         train_backbone=True,
         use_timm_backbone=False,
         backbone_config=PvtV2Config(
