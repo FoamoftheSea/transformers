@@ -2590,7 +2590,6 @@ class MultiformerDet3DLoss(nn.Module):
                 for i in range(batch_size)
             ]
         ) / center_gt[:, 2, None]
-        center_2d_label /= image_size
         center_2d_loss = F.l1_loss(center_2d_pred, center_2d_label)
 
         num_heading_bins = self.config.det3d_num_heading_bins
