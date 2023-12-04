@@ -2601,8 +2601,8 @@ class MultiformerDet3DLoss(nn.Module):
         center_loss = F.l1_loss(center_pred, center_gt)
 
         z_gt = torch.log(center_gt[..., 2])
-        z_samples = z_samples_offsets[..., 0]
-        z_offsets_pred = z_samples_offsets[..., 1]
+        z_samples = torch.cat([z_samples_offsets.squeeze(1)[i, indices[i][0], 0] for i in range(batch_size)])
+        z_offsets_pred = torch.cat([z_samples_offsets.squeeze(1)[i, indices[i][0], 1] for i in range(batch_size)])
         z_offsets_gt = z_gt - z_samples
         z_offset_loss = F.l1_loss(z_offsets_pred, z_offsets_gt)
 
