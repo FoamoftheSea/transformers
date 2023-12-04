@@ -2164,6 +2164,10 @@ class Multiformer(DeformableDetrPreTrainedModel):
         else:
             intrinsics = None
 
+        batch_size, num_channels, height, width = pixel_values.shape
+        if pixel_mask is None:
+            pixel_mask = torch.ones((batch_size, height, width), dtype=torch.long, device=self.device)
+
         # First, sent images through DETR base model to obtain encoder + decoder outputs
         outputs = self.model(
             pixel_values,
@@ -2216,14 +2220,14 @@ class Multiformer(DeformableDetrPreTrainedModel):
 
                 if MultiformerTask.DET_3D in self.config.tasks + self.config.train_tasks:
                     box_output = self.bbox3d_embed[level](hidden_states[:, level])
-                    outputs_coord_logits = box_output[..., :2] + reference
-                    outputs_coord_2d = outputs_coord_logits.tanh()
+                    center_coord_logits = box_output[..., :2] + reference
                     z_offset = box_output[..., 2].unsqueeze(-1)
                     z_sample = nn.functional.grid_sample(
-                        outputs.predicted_depth.unsqueeze(1), outputs_coord_2d.unsqueeze(-2), align_corners=False
+                        outputs.predicted_depth.unsqueeze(1), center_coord_logits.tanh().unsqueeze(-2), align_corners=False
                     ).squeeze(1)
+                    center_coord_2d = center_coord_logits.sigmoid()
                     z_sample += z_offset
-                    uv = outputs_coord_logits.sigmoid() * torch.tensor(pixel_values.transpose(-1, -2).shape[-2:]).to(self.device)
+                    uv = center_coord_2d * torch.tensor(pixel_values.transpose(-1, -2).shape[-2:]).to(self.device)
                     uv1 = torch.cat([uv, torch.ones_like(uv[..., :1])], dim=-1)
                     xyz = (torch.linalg.inv(intrinsics) @ uv1.transpose(-1, -2)) * torch.exp(z_sample).transpose(-1, -2)
                     num_heading_bins = self.config.det3d_num_heading_bins
@@ -2233,11 +2237,12 @@ class Multiformer(DeformableDetrPreTrainedModel):
                     size_residuals_normalized = box_output[..., -3*self.config.num_labels:]
                     output_boxes_3d = torch.cat(
                         tensors=[
+                            center_coord_2d,
                             xyz.transpose(-1, -2),
                             heading_scores,
                             heading_residuals_normalized,
                             size_scores,
-                            size_residuals_normalized
+                            size_residuals_normalized,
                         ],
                         dim=-1
                     )
@@ -2346,7 +2351,8 @@ class Multiformer(DeformableDetrPreTrainedModel):
                         warnings.warn("'det3d' listed as training tasks, but no box3d labels found for frame.")
                     else:
                         criterion_3d = MultiformerDet3DLoss(self.config, self.type_mean_size_array)
-                        total_loss_3d, loss_dict_3d = criterion_3d(pred_boxes_3d, labels_3d, indices)
+                        image_size = torch.cat([pixel_mask.sum(-2)[:, -1:], pixel_mask.sum(-1)[:, -1:]], -1)
+                        total_loss_3d, loss_dict_3d = criterion_3d(pred_boxes_3d, labels_3d, indices, intrinsics, image_size)
                         loss[MultiformerTask.DET_3D] = total_loss_3d
                         loss_dict.update(loss_dict_3d)
 
@@ -2560,41 +2566,52 @@ def boxes3d_to_corners3d_torch(boxes3d, flip=False):
 
 class MultiformerDet3DLoss(nn.Module):
 
-    def __init__(self, config: MultiformerConfig, type_mean_size_array: Tensor, box_loss_weight=1.0, corner_loss_weight=10.0):
+    def __init__(self, config: MultiformerConfig, type_mean_size_array: Tensor, box_loss_weight=1.0, corner_loss_weight=0.1):
         super().__init__()
         self.config = config
         self.type_mean_size_array = type_mean_size_array
         self.box_loss_weight = box_loss_weight
         self.corner_loss_weight = corner_loss_weight
 
-    def forward(self, boxes, labels, indices):
+    def forward(self, boxes, labels_3d, indices, intrinsics, image_size):
         # Adapted from https://github.com/xinzhuma/patchnet/blob/fbff77fa6cc9cf108f475a97440d16c5a37a6b9f/lib/losses/patchnet_loss.py
-        batch_size = len(labels)
+        batch_size = len(labels_3d)
         assert batch_size == boxes.shape[0] == len(indices)
         device = boxes.device
-        center_pred = torch.cat([boxes[i, indices[i][0], :3] for i in range(batch_size)])
-        center_gt = torch.cat([labels[i]["boxes3d"][indices[i][1]][:, :3] for i in range(batch_size)])
+
+        center_pred = torch.cat([boxes[i, indices[i][0], 2:5] for i in range(batch_size)])
+        center_gt = torch.cat([labels_3d[i]["boxes3d"][indices[i][1]][:, :3] for i in range(batch_size)])
         center_loss = F.l1_loss(center_pred, center_gt)
+
+        center_2d_pred = torch.cat([boxes[i, indices[i][0], :2] for i in range(batch_size)])
+        center_2d_label = torch.cat(
+            [
+                (intrinsics[i] @ labels_3d[i]["boxes3d"][indices[i][1]][:, :3].T).T[..., :2] / image_size[i]
+                for i in range(batch_size)
+            ]
+        ) / center_gt[:, 2, None]
+        center_2d_label /= image_size
+        center_2d_loss = F.l1_loss(center_2d_pred, center_2d_label)
 
         num_heading_bins = self.config.det3d_num_heading_bins
 
         # Heading bin classification loss
-        heading_class_pred = torch.cat([boxes[i, indices[i][0], 3:num_heading_bins + 3] for i in range(batch_size)])
-        heading_class_label = torch.cat([labels[i]["heading_class_labels"][indices[i][1]].long() for i in range(batch_size)])
+        heading_class_pred = torch.cat([boxes[i, indices[i][0], 5:num_heading_bins + 5] for i in range(batch_size)])
+        heading_class_label = torch.cat([labels_3d[i]["heading_class_labels"][indices[i][1]].long() for i in range(batch_size)])
         heading_class_loss = F.cross_entropy(heading_class_pred, heading_class_label)
 
         # Normalized heading residual loss
         hcls_onehot = torch.zeros_like(heading_class_pred).scatter_(
             dim=1, index=heading_class_label.view(-1, 1), value=1)
-        heading_residual_label = torch.cat([labels[i]["heading_residual_labels"][indices[i][1]] for i in range(batch_size)])
+        heading_residual_label = torch.cat([labels_3d[i]["heading_residual_labels"][indices[i][1]] for i in range(batch_size)])
         # heading_residual_label = heading_residual_label.float()
         heading_residual_normalized_label = heading_residual_label / (torch.pi / num_heading_bins)
-        heading_residual_normalized_pred = torch.cat([boxes[i, indices[i][0], 3+num_heading_bins:3+2*num_heading_bins] for i in range(batch_size)])
+        heading_residual_normalized_pred = torch.cat([boxes[i, indices[i][0], 5+num_heading_bins:5+2*num_heading_bins] for i in range(batch_size)])
         heading_residual_normalized = torch.sum(heading_residual_normalized_pred * hcls_onehot, 1)
         heading_residual_normalized_loss = F.l1_loss(heading_residual_normalized, heading_residual_normalized_label)
 
         # Size loss. Assumes that each box class has its own size class
-        size_class_label = torch.cat([labels[i]["class_labels"][indices[i][1]] for i in range(batch_size)])
+        size_class_label = torch.cat([labels_3d[i]["class_labels"][indices[i][1]] for i in range(batch_size)])
         size_class_loss = None
         if self.config.det3d_predict_class:
             size_scores = torch.cat([boxes[i, indices[i][0], -4*self.config.num_labels:-3*self.config.num_labels] for i in range(batch_size)])
@@ -2608,7 +2625,7 @@ class MultiformerDet3DLoss(nn.Module):
 
         type_mean_size_array = self.type_mean_size_array.to(device)
         mean_size_label = torch.sum(type_mean_size_array * scls_onehot, 1)
-        size_residual_label = torch.cat([labels[i]["size_residual_labels"][indices[i][1]] for i in range(batch_size)])
+        size_residual_label = torch.cat([labels_3d[i]["size_residual_labels"][indices[i][1]] for i in range(batch_size)])
         size_residual_label_normalized = size_residual_label / mean_size_label
         size_residual_normalized_loss = F.l1_loss(size_residual_label_normalized, size_residual_normalized)
 
@@ -2644,7 +2661,8 @@ class MultiformerDet3DLoss(nn.Module):
                                  F.l1_loss(corners_3d_pred, corners_3d_gt_flip))
 
         loss_dict = {
-            "box3d_center_l1_loss": center_loss,
+            "box3d_center_2d_l1_loss": center_2d_loss,
+            "box3d_center_3d_l1_loss": center_loss,
             "box3d_heading_class_loss": heading_class_loss,
             "box3d_heading_residual_loss": heading_residual_normalized_loss,
             "box3d_size_residual_loss": size_residual_normalized_loss,
@@ -2652,10 +2670,11 @@ class MultiformerDet3DLoss(nn.Module):
         }
 
         combined_loss = (
-                center_loss +
+                center_2d_loss +
+                center_loss * 0.1 +
                 heading_class_loss +
-                heading_residual_normalized_loss * 20 +
-                size_residual_normalized_loss * 20 +
+                heading_residual_normalized_loss * 10 +
+                size_residual_normalized_loss * 10 +
                 self.corner_loss_weight * corners_loss
         )
 

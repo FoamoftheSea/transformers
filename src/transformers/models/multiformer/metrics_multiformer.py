@@ -80,11 +80,11 @@ class MultiformerDet3DEvalMetric:
         for batch_item in preds:
             boxes3d = batch_item["boxes3d"]
             # Convert heading to radians
-            heading_class_scores = boxes3d[:, 3:self.num_heading_bins + 3]
+            heading_class_scores = boxes3d[:, 5:self.num_heading_bins + 5]
             heading_class_pred = heading_class_scores.argmax(-1)
             hcls_onehot = np.zeros((heading_class_pred.shape[0], self.num_heading_bins))
             hcls_onehot[np.arange(hcls_onehot.shape[0]), heading_class_pred] = 1
-            heading_residual_normalized_pred = boxes3d[:, self.num_heading_bins + 3:self.num_heading_bins*2 + 3]
+            heading_residual_normalized_pred = boxes3d[:, self.num_heading_bins + 5:self.num_heading_bins*2 + 5]
             heading_bin_centers = np.arange(0, 2 * np.pi, 2 * np.pi / self.num_heading_bins)
             heading_pred = heading_residual_normalized_pred * (np.pi / self.num_heading_bins) + heading_bin_centers
             heading_pred = np.sum(heading_pred * hcls_onehot, 1)
@@ -109,7 +109,7 @@ class MultiformerDet3DEvalMetric:
                     "name": [self.config.id2label[class_id] for class_id in size_class_preds],
                     "bbox": batch_item["boxes2d"].detach().cpu().numpy(),
                     "score": batch_item["score"],
-                    "location": boxes3d[:, :3],
+                    "location": boxes3d[:, 2:5],
                     "dimensions": size_pred,
                     "rotation_y": heading_pred,
                 }
