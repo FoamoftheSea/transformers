@@ -2221,7 +2221,7 @@ class Multiformer(DeformableDetrPreTrainedModel):
                 if MultiformerTask.DET_3D in self.config.tasks + self.config.train_tasks:
                     box_output = self.bbox3d_embed[level](hidden_states[:, level])
                     center_coord_logits = box_output[..., :2] + reference
-                    z_offset = box_output[..., 2].unsqueeze(-1).sigmoid() * self.config.max_depth
+                    z_offset = box_output[..., 2].unsqueeze(-1)
                     z_sample = nn.functional.grid_sample(
                         outputs.predicted_depth.unsqueeze(1),
                         center_coord_logits.tanh().unsqueeze(-2),
