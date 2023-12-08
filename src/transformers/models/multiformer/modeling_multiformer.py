@@ -2047,20 +2047,21 @@ class Multiformer(DeformableDetrPreTrainedModel):
         self.bbox_embed = DeformableDetrMLPPredictionHead(
             input_dim=config.d_model, hidden_dim=config.d_model, output_dim=4, num_layers=3
         )
-        # 3D boxes: (n_boxes, 3+2*num_heading_bin+4*num_size_cluster)
-        channel_mult = 4 if config.det3d_predict_class else 3
-        self.bbox3d_embed = DeformableDetrMLPPredictionHead(
-            input_dim=config.d_model,
-            hidden_dim=config.d_model,
-            output_dim=3 + 2 * config.det3d_num_heading_bins + channel_mult * config.num_labels,
-            num_layers=3
-        )
+        if MultiformerTask.DET_3D not in config.omit_heads:
+            # 3D boxes: (n_boxes, 3+2*num_heading_bin+4*num_size_cluster)
+            channel_mult = 4 if config.det3d_predict_class else 3
+            self.bbox3d_embed = DeformableDetrMLPPredictionHead(
+                input_dim=config.d_model,
+                hidden_dim=config.d_model,
+                output_dim=3 + 2 * config.det3d_num_heading_bins + channel_mult * config.num_labels,
+                num_layers=3
+            )
 
-        self.type_mean_size_array = torch.zeros(size=(config.num_labels, 3))
-        self.type_mean_id_map: Dict[int, int] = {}
-        for i, class_id in enumerate(sorted(config.id2label.keys())):
-            self.type_mean_size_array[i] = torch.tensor(config.det3d_type_mean_sizes[config.id2label[class_id]])
-            self.type_mean_id_map[class_id] = i
+            self.type_mean_size_array = torch.zeros(size=(config.num_labels, 3))
+            self.type_mean_id_map: Dict[int, int] = {}
+            for i, class_id in enumerate(sorted(config.id2label.keys())):
+                self.type_mean_size_array[i] = torch.tensor(config.det3d_type_mean_sizes[config.id2label[class_id]])
+                self.type_mean_id_map[class_id] = i
 
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
@@ -2080,7 +2081,8 @@ class Multiformer(DeformableDetrPreTrainedModel):
             nn.init.constant_(self.bbox_embed.layers[-1].bias.data[2:], -2.0)
             self.class_embed = nn.ModuleList([self.class_embed for _ in range(num_pred)])
             self.bbox_embed = nn.ModuleList([self.bbox_embed for _ in range(num_pred)])
-            self.bbox3d_embed = nn.ModuleList([self.bbox3d_embed for _ in range(num_pred)])
+            if MultiformerTask.DET_3D not in config.omit_heads:
+                self.bbox3d_embed = nn.ModuleList([self.bbox3d_embed for _ in range(num_pred)])
             self.model.decoder.bbox_embed = None
         if config.two_stage:
             # hack implementation for two-stage

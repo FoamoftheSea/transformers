@@ -178,6 +178,7 @@ class MultiformerConfig(PretrainedConfig):
         self,
         tasks=["semseg", "depth", "det_2d"],
         train_tasks=["semseg", "depth", "det_2d"],
+        omit_heads=["det_3d"],
         train_backbone=True,
         use_timm_backbone=False,
         backbone_config=PvtV2Config(
@@ -306,6 +307,7 @@ class MultiformerConfig(PretrainedConfig):
 
         self.tasks = tasks
         self.train_tasks = train_tasks
+        self.omit_heads = [] if omit_heads is None else omit_heads
         self.train_backbone = train_backbone
         self.use_timm_backbone = use_timm_backbone
         self.backbone_config = backbone_config
