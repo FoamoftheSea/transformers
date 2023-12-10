@@ -227,6 +227,7 @@ class MultiformerConfig(PretrainedConfig):
         det3d_num_heading_bins=12,
         det3d_type_mean_sizes=None,
         det3d_predict_class=False,
+        det3d_max_distance=500,
         encoder_n_points=4,
         decoder_n_points=4,
         two_stage=False,
@@ -350,6 +351,7 @@ class MultiformerConfig(PretrainedConfig):
         self.det2d_fuse_depth = det2d_fuse_depth
         self.det3d_num_heading_bins = det3d_num_heading_bins
         self.det3d_predict_class = det3d_predict_class
+        self.det3d_max_distance = det3d_max_distance
         self.encoder_n_points = encoder_n_points
         self.decoder_n_points = decoder_n_points
         self.two_stage = two_stage

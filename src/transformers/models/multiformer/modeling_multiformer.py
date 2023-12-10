@@ -21,6 +21,7 @@ import warnings
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
@@ -2224,18 +2225,18 @@ class Multiformer(DeformableDetrPreTrainedModel):
                 if MultiformerTask.DET_3D in self.config.tasks + self.config.train_tasks:
                     box_output = self.bbox3d_embed[level](hidden_states[:, level])
                     center_coord_logits = box_output[..., :2] + reference
-                    z_offset = box_output[..., 2].unsqueeze(-1)
-                    z_sample = nn.functional.grid_sample(
-                        outputs.predicted_depth.unsqueeze(1),
-                        center_coord_logits.tanh().unsqueeze(-2),
-                        align_corners=False,
-                        padding_mode="reflection",
-                    ).squeeze(1)
+                    z_pred = torch.exp(box_output[..., 2].unsqueeze(-1).sigmoid() * np.log(self.config.det3d_max_distance))
+                    # z_sample = nn.functional.grid_sample(
+                    #     outputs.predicted_depth.unsqueeze(1),
+                    #     center_coord_logits.tanh().unsqueeze(-2),
+                    #     align_corners=False,
+                    #     padding_mode="reflection",
+                    # ).squeeze(1)
                     center_coord_2d = center_coord_logits.sigmoid()
-                    z_combined = z_sample + z_offset
+                    # z_combined = z_sample + z_offset
                     uv = center_coord_2d * torch.tensor(pixel_values.transpose(-1, -2).shape[-2:]).to(self.device)
                     uv1 = torch.cat([uv, torch.ones_like(uv[..., :1])], dim=-1)
-                    xyz = (torch.linalg.inv(intrinsics) @ uv1.transpose(-1, -2)) * torch.exp(z_combined).transpose(-1, -2)
+                    xyz = (torch.linalg.inv(intrinsics) @ uv1.transpose(-1, -2)).transpose(-1, -2) * z_pred
                     num_heading_bins = self.config.det3d_num_heading_bins
                     heading_scores = box_output[..., 3:num_heading_bins+3]
                     heading_residuals_normalized = box_output[..., num_heading_bins+3:num_heading_bins*2+3]
@@ -2244,7 +2245,7 @@ class Multiformer(DeformableDetrPreTrainedModel):
                     output_boxes_3d = torch.cat(
                         tensors=[
                             center_coord_2d,
-                            xyz.transpose(-1, -2),
+                            xyz,
                             heading_scores,
                             heading_residuals_normalized,
                             size_scores,
@@ -2252,10 +2253,10 @@ class Multiformer(DeformableDetrPreTrainedModel):
                         ],
                         dim=-1
                     )
-                    z_sample_offsets = torch.cat([z_sample, z_offset], dim=-1)
+                    # z_sample_offsets = torch.cat([z_sample, z_offset], dim=-1)
 
                     outputs_boxes_3d.append(output_boxes_3d)
-                    outputs_z_samples_offsets.append(z_sample_offsets)
+                    # outputs_z_samples_offsets.append(z_sample_offsets)
 
             outputs_class = torch.stack(outputs_classes)
             logits = outputs_class[-1]
@@ -2270,7 +2271,7 @@ class Multiformer(DeformableDetrPreTrainedModel):
 
             if len(outputs_z_samples_offsets) > 0:
                 outputs_z_samples_offsets = torch.stack(outputs_z_samples_offsets)
-                pred_z_samples_offsets = outputs_z_samples_offsets[-1]
+                # pred_z_samples_offsets = outputs_z_samples_offsets[-1]
 
         loss = {}
         if "semseg" in self.config.train_tasks:
@@ -2370,7 +2371,7 @@ class Multiformer(DeformableDetrPreTrainedModel):
                             indices,
                             intrinsics,
                             image_size_wh,
-                            pred_z_samples_offsets,
+                            # pred_z_samples_offsets,
                         )
                         loss[MultiformerTask.DET_3D] = total_loss_3d
                         loss_dict.update(loss_dict_3d)
@@ -2592,7 +2593,7 @@ class MultiformerDet3DLoss(nn.Module):
         self.box_loss_weight = box_loss_weight
         self.corner_loss_weight = corner_loss_weight
 
-    def forward(self, boxes, labels_3d, indices, intrinsics, image_size_wh, z_samples_offsets):
+    def forward(self, boxes, labels_3d, indices, intrinsics, image_size_wh):  # z_samples_offsets):
         # Adapted from https://github.com/xinzhuma/patchnet/blob/fbff77fa6cc9cf108f475a97440d16c5a37a6b9f/lib/losses/patchnet_loss.py
         batch_size = len(labels_3d)
         assert batch_size == boxes.shape[0] == len(indices)
@@ -2601,12 +2602,16 @@ class MultiformerDet3DLoss(nn.Module):
         center_pred = torch.cat([boxes[i, indices[i][0], 2:5] for i in range(batch_size)])
         center_gt = torch.cat([labels_3d[i]["boxes3d"][indices[i][1]][:, :3] for i in range(batch_size)])
         center_loss = F.l1_loss(center_pred, center_gt)
+        # center_criterion = nn.MSELoss()
+        # center_loss = center_criterion(center_pred, center_gt)
 
         z_gt = torch.log(center_gt[..., 2])
-        z_samples = torch.cat([z_samples_offsets[i, indices[i][0], 0] for i in range(batch_size)])
-        z_offsets_pred = torch.cat([z_samples_offsets[i, indices[i][0], 1] for i in range(batch_size)])
-        z_offsets_gt = z_gt - z_samples
-        z_offset_loss = F.l1_loss(z_offsets_pred, z_offsets_gt)
+        z_pred = torch.log(center_pred[..., 2])
+        # z_samples = torch.cat([z_samples_offsets[i, indices[i][0], 0] for i in range(batch_size)])
+        # z_offsets_pred = torch.cat([z_samples_offsets[i, indices[i][0], 1] for i in range(batch_size)])
+        # z_offsets_gt = z_gt - z_samples
+        # z_offset_loss = F.l1_loss(z_offsets_pred, z_offsets_gt)
+        z_log_l1_loss = F.l1_loss(z_pred, z_gt)
 
         center_2d_pred = torch.cat([boxes[i, indices[i][0], :2] for i in range(batch_size)])
         center_2d_label = torch.cat(
@@ -2687,7 +2692,7 @@ class MultiformerDet3DLoss(nn.Module):
         loss_dict = {
             "box3d_center_2d_l1_loss": center_2d_loss,
             "box3d_center_3d_l1_loss": center_loss,
-            "box3d_z_offset_l1_loss": z_offset_loss,
+            "box3d_z_log_l1_loss": z_log_l1_loss,
             "box3d_heading_class_loss": heading_class_loss,
             "box3d_heading_residual_loss": heading_residual_normalized_loss,
             "box3d_size_residual_loss": size_residual_normalized_loss,
@@ -2696,7 +2701,7 @@ class MultiformerDet3DLoss(nn.Module):
 
         combined_loss = (
                 center_2d_loss +
-                z_offset_loss +
+                z_log_l1_loss +
                 center_loss * 0.1 +
                 heading_class_loss +
                 heading_residual_normalized_loss * 10 +

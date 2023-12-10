@@ -509,7 +509,7 @@ def post_process_object_detection(
         else:
             raise ValueError("'outputs' must be dict or DetrObjectDetectionOutput type.")
 
-        out_logits = torch.FloatTensor(out_logits)
+        out_logits = out_logits.type(torch.FloatTensor)
 
         if target_sizes is not None:
             if len(out_logits) != len(target_sizes):
@@ -531,7 +531,7 @@ def post_process_object_detection(
     out_bbox = torch.Tensor(out_bbox)
     boxes = center_to_corners_format(out_bbox)
     if not boxes_only:
-        boxes = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1, 1, 4))
+        boxes = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1, 1, 4).to(boxes.device))
 
     # and from relative [0, 1] to absolute [0, height] coordinates
     if target_sizes is not None:
