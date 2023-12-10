@@ -75,6 +75,7 @@ if is_vision_available():
 
 class MultiformerTask:
     DET_2D = "det_2d"
+    DET_3D = "det_3d"
     SEMSEG = "semseg"
     DEPTH = "depth"
 
@@ -240,6 +241,8 @@ class MultiformerModelOutput(ModelOutput):
     enc_outputs_class: Optional[torch.FloatTensor] = None
     enc_outputs_coord_logits: Optional[torch.FloatTensor] = None
     backbone_features: Tuple[torch.FloatTensor] = None
+    logits_semantic: Optional[torch.FloatTensor] = None
+    predicted_depth: Optional[torch.FloatTensor] = None
 
 
 @dataclass
@@ -261,6 +264,15 @@ class MultiformerOutput(ModelOutput):
             values are normalized in [0, 1], relative to the size of each individual image in the batch (disregarding
             possible padding). You can use [`~DeformableDetrProcessor.post_process_object_detection`] to retrieve the
             unnormalized bounding boxes.
+        pred_boxes_3d (`torch.FloatTensor` of shape `(batch_size, num_queries, 7):
+            Each box has 7 elements (dx, dy, dz, h, w, l, phi), which are defined as:
+                dx: normalized offset on x axis from 2D box center on image plane.
+                dy: normalized offset on y axis from 2D box center on image plane.
+                dz: offset of log loss to box center from pixel depth (when box center is occluded by object).
+                phi: heading angle btw [-pi, pi] relative to ego.
+                l: cuboid length
+                w: cuboid width
+                h: cuboid height
         logits_semantic (`torch.FloatTensor` of shape `(batch_size, config.num_labels, logits_height, logits_width)`):
             Classification scores for each pixel.
 
@@ -320,6 +332,7 @@ class MultiformerOutput(ModelOutput):
     loss_dict: Optional[Dict] = None
     logits: torch.FloatTensor = None
     pred_boxes: torch.FloatTensor = None
+    pred_boxes_3d: torch.FloatTensor = None
     logits_semantic: torch.FloatTensor = None
     pred_depth: torch.FloatTensor = None
     auxiliary_outputs: Optional[List[Dict]] = None
@@ -1517,6 +1530,19 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
         self.backbone = DeformableDetrConvEncoder(config)
         self.position_embedding = build_position_encoding(config)
 
+        # Segformer semantic segmentation head
+        self.semantic_head = MultiformerSegmentationHead(config)
+
+        # GLPN depth head
+        self.depth_decoder = MultiformerDepthDecoder(config)
+        self.depth_head = MultiformerDepthEstimationHead(config)
+
+        extra_channels = 0
+        if self.config.det2d_fuse_semantic:
+            extra_channels += self.config.backbone_config.num_labels
+        if self.config.det2d_fuse_depth:
+            extra_channels += 3
+
         # Create input projection layers
         input_proj_list = []
         input_proj_parms = zip(
@@ -1529,14 +1555,14 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
             in_channels = self.backbone.intermediate_channel_sizes[level_idx]
             input_proj_list.append(
                 nn.Sequential(
-                    nn.Conv2d(in_channels, config.d_model, kernel_size=kernel, stride=stride, padding=padding),
+                    nn.Conv2d(in_channels + extra_channels, config.d_model, kernel_size=kernel, stride=stride, padding=padding),
                     nn.GroupNorm(config.det2d_input_proj_groups, config.d_model),
                 )
             )
         for _ in range(config.det2d_extra_feature_levels):
             input_proj_list.append(
                 nn.Sequential(
-                    nn.Conv2d(in_channels, config.d_model, kernel_size=3, stride=2, padding=1),
+                    nn.Conv2d(in_channels + extra_channels, config.d_model, kernel_size=3, stride=2, padding=1),
                     nn.GroupNorm(config.det2d_input_proj_groups, config.d_model),
                 )
             )
@@ -1665,6 +1691,7 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        intrinsics: Optional[torch.FloatTensor] = None,
     ) -> Union[Tuple[torch.FloatTensor], MultiformerModelOutput]:
         r"""
         Returns:
@@ -1705,16 +1732,56 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
         # Extract multi-scale feature maps of same resolution `config.d_model` (cf Figure 4 in paper)
         # First, sent pixel_values + pixel_mask through Backbone to obtain the features
         # which is a list of tuples
-        features = self.backbone(pixel_values, pixel_mask)
+        if self.config.train_backbone:
+            features = self.backbone(pixel_values, pixel_mask)
+        else:
+            with torch.no_grad():
+                features = self.backbone(pixel_values, pixel_mask)
 
-        if "det2d" in self.config.tasks:
+        logits_semantic = None
+        predicted_depth = None
+        semantic_fuse = None
+        depth_fuse = None
+
+        if MultiformerTask.SEMSEG in self.config.tasks + self.config.train_tasks or self.config.det2d_fuse_semantic:
+            if MultiformerTask.SEMSEG in self.config.train_tasks:
+                logits_semantic = self.semantic_head([f[0] for f in features])
+            else:
+                with torch.no_grad():
+                    logits_semantic = self.semantic_head([f[0] for f in features])
+        if MultiformerTask.DEPTH in self.config.tasks + self.config.train_tasks or self.config.det2d_fuse_depth:
+            if MultiformerTask.DEPTH in self.config.train_tasks:
+                depth_decoder_out = self.depth_decoder([f[0]for f in features])
+                predicted_depth = self.depth_head(depth_decoder_out)
+            else:
+                with torch.no_grad():
+                    depth_decoder_out = self.depth_decoder([f[0]for f in features])
+                    predicted_depth = self.depth_head(depth_decoder_out)
+        if MultiformerTask.DET_2D in self.config.tasks + self.config.train_tasks:
             # Then, apply 1x1 convolution to reduce the channel dimension to d_model (256 by default)
             sources = []
             masks = []
-            # position_embeddings_list = [position_embeddings_list[i] for i in self.config.det2d_input_feature_levels]
             position_embeddings_list = []
             for proj_level, feature_level in enumerate(self.config.det2d_input_feature_levels):
                 source, mask = features[feature_level]
+                if logits_semantic is not None and self.config.det2d_fuse_semantic:
+                    semantic_fuse = nn.functional.interpolate(
+                        logits_semantic, size=source.shape[-2:], mode="bilinear", align_corners=False
+                    ).detach() # Do not want to backprop loss from this task head
+                    source = torch.cat([source, semantic_fuse], axis=1)
+                if predicted_depth is not None and self.config.det2d_fuse_depth:
+                    depth_rescale = nn.functional.interpolate(
+                        predicted_depth.unsqueeze(1), size=source.shape[-2:], mode="bilinear", align_corners=False
+                    ).detach()  # Do not want to backprop loss from this task head
+                    h, w = source.shape[-2:]
+                    uv = torch.meshgrid(torch.arange(h), torch.arange(w), indexing="xy")
+                    uv = torch.stack([t.flatten() for t in uv]).repeat(batch_size, 1, 1).transpose(-1, -2)
+                    uv1 = torch.cat([uv, torch.ones(batch_size, h * w, 1)], dim=-1).to(self.device)
+                    # xy_prime = uv - intrinsics[:, :2, 2].unsqueeze(1)
+                    # xy = xy_prime * (depth_rescale.flatten(-2).transpose(-1, -2) / torch.stack([intrinsics[..., i, i] for i in range(2)], dim=1).unsqueeze(1))
+                    # xyz = torch.cat([xy, depth_rescale.flatten(-2).transpose(-1, -2)], dim=-1)
+                    xyz = (torch.linalg.inv(intrinsics) @ uv1.transpose(-1, -2)) * torch.exp(depth_rescale).flatten(-2)
+                    source = torch.cat([source, xyz.reshape(batch_size, 3, h, w)], axis=1)
                 source = self.input_proj[proj_level](source)
                 if self.config.det2d_input_proj_strides[proj_level] > 1:
                     mask = nn.functional.interpolate(pixel_mask[None].float(), size=source.shape[-2:]).to(torch.bool)[0]
@@ -1730,9 +1797,26 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
                 _len_sources = len(sources)
                 for level in range(_len_sources, self.config.num_feature_levels):
                     if level == _len_sources:
-                        source = self.input_proj[level](features[-1][0])
+                        source = features[-1][0]
                     else:
-                        source = self.input_proj[level](sources[-1])
+                        source = sources[-1]
+                    if logits_semantic is not None and self.config.det2d_fuse_semantic:
+                        scale = source.shape[-1] / logits_semantic.shape[-1]
+                        semantic_fuse = nn.functional.interpolate(logits_semantic, scale_factor=scale, mode="bilinear", align_corners=False)
+                    if predicted_depth is not None and self.config.det2d_fuse_depth:
+                        depth_rescale = nn.functional.interpolate(
+                            predicted_depth.unsqueeze(1), size=source.shape[-2:], mode="bilinear", align_corners=False
+                        ).detach()  # Do not want to backprop loss from this task head
+                        h, w = source.shape[-2:]
+                        uv = torch.meshgrid(torch.arange(h), torch.arange(w), indexing="xy")
+                        uv = torch.stack([t.flatten() for t in uv]).repeat(batch_size, 1, 1).transpose(
+                            -1, -2)
+                        uv1 = torch.cat([uv, torch.ones(batch_size, h * w, 1)], dim=-1).to(self.device)
+                        xyz = (torch.linalg.inv(intrinsics) @ uv1.transpose(-1, -2)) * torch.exp(depth_rescale).flatten(-2)
+                        source = torch.cat([source, xyz.reshape(batch_size, 3, h, w)], axis=1)
+                    if any(t is not None for t in [semantic_fuse, depth_fuse]):
+                        source = torch.cat([t for t in [source, semantic_fuse, depth_fuse] if t is not None], dim=-3)
+                    source = self.input_proj[level](source)
                     mask = nn.functional.interpolate(pixel_mask[None].float(), size=source.shape[-2:]).to(torch.bool)[0]
                     pos_l = self.position_embedding(source, mask).to(source.dtype) if self.config.det2d_use_pos_embed else None
                     sources.append(source)
@@ -1863,10 +1947,16 @@ class MultiformerModel(DeformableDetrPreTrainedModel):
                 enc_outputs_class=enc_outputs_class,
                 enc_outputs_coord_logits=enc_outputs_coord_logits,
                 backbone_features=features,
+                logits_semantic=logits_semantic,
+                predicted_depth=predicted_depth,
             )
 
         else:
-            return MultiformerModelOutput(backbone_features=features)
+            return MultiformerModelOutput(
+                backbone_features=features,
+                logits_semantic=logits_semantic,
+                predicted_depth=predicted_depth,
+            )
 
 
 class MultiformerSemanticMLP(SegformerMLP):
@@ -1944,7 +2034,7 @@ class MultiformerDepthEstimationHead(GLPNDepthEstimationHead):
 )
 class Multiformer(DeformableDetrPreTrainedModel):
     # When using clones, all layers > 0 will be clones, but layer 0 *is* required
-    _tied_weights_keys = [r"bbox_embed\.[1-9]\d*", r"class_embed\.[1-9]\d*"]
+    _tied_weights_keys = [r"bbox_embed\.[1-9]\d*", r"class_embed\.[1-9]\d*", r"bbox3d_embed\.[1-9]\d*"]
 
     def __init__(self, config: MultiformerConfig):
         super().__init__(config)
@@ -1952,18 +2042,26 @@ class Multiformer(DeformableDetrPreTrainedModel):
         # Deformable DETR encoder-decoder model
         self.model = MultiformerModel(config)
 
-        # Segformer semantic segmentation head
-        self.semantic_head = MultiformerSegmentationHead(config)
-
-        # GLPN depth head
-        self.depth_decoder = MultiformerDepthDecoder(config)
-        self.depth_head = MultiformerDepthEstimationHead(config)
-
         # Detection heads on top
         self.class_embed = nn.Linear(config.d_model, config.num_labels)
         self.bbox_embed = DeformableDetrMLPPredictionHead(
             input_dim=config.d_model, hidden_dim=config.d_model, output_dim=4, num_layers=3
         )
+        if MultiformerTask.DET_3D not in config.omit_heads:
+            # 3D boxes: (n_boxes, 3+2*num_heading_bin+4*num_size_cluster)
+            channel_mult = 4 if config.det3d_predict_class else 3
+            self.bbox3d_embed = DeformableDetrMLPPredictionHead(
+                input_dim=config.d_model,
+                hidden_dim=config.d_model,
+                output_dim=3 + 2 * config.det3d_num_heading_bins + channel_mult * config.num_labels,
+                num_layers=3
+            )
+
+            self.type_mean_size_array = torch.zeros(size=(config.num_labels, 3))
+            self.type_mean_id_map: Dict[int, int] = {}
+            for i, class_id in enumerate(sorted(config.id2label.keys())):
+                self.type_mean_size_array[i] = torch.tensor(config.det3d_type_mean_sizes[config.id2label[class_id]])
+                self.type_mean_id_map[class_id] = i
 
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
@@ -1983,6 +2081,8 @@ class Multiformer(DeformableDetrPreTrainedModel):
             nn.init.constant_(self.bbox_embed.layers[-1].bias.data[2:], -2.0)
             self.class_embed = nn.ModuleList([self.class_embed for _ in range(num_pred)])
             self.bbox_embed = nn.ModuleList([self.bbox_embed for _ in range(num_pred)])
+            if MultiformerTask.DET_3D not in config.omit_heads:
+                self.bbox3d_embed = nn.ModuleList([self.bbox3d_embed for _ in range(num_pred)])
             self.model.decoder.bbox_embed = None
         if config.two_stage:
             # hack implementation for two-stage
@@ -2012,6 +2112,7 @@ class Multiformer(DeformableDetrPreTrainedModel):
         inputs_embeds: Optional[torch.FloatTensor] = None,
         decoder_inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[List[dict]] = None,
+        labels_3d: Optional[List[dict]] = None,
         labels_semantic: Optional[torch.LongTensor] = None,
         labels_depth: Optional = None,
         output_attentions: Optional[bool] = None,
@@ -2060,6 +2161,15 @@ class Multiformer(DeformableDetrPreTrainedModel):
         ```"""
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        if labels is not None and labels[0].get("intrinsics", None) is not None:
+            intrinsics = torch.cat([l.pop("intrinsics").unsqueeze(0) for l in labels], dim=0).to(self.device)
+        else:
+            intrinsics = None
+
+        batch_size, num_channels, height, width = pixel_values.shape
+        if pixel_mask is None:
+            pixel_mask = torch.ones((batch_size, height, width), dtype=torch.long, device=self.device)
+
         # First, sent images through DETR base model to obtain encoder + decoder outputs
         outputs = self.model(
             pixel_values,
@@ -2071,125 +2181,205 @@ class Multiformer(DeformableDetrPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            intrinsics=intrinsics,
         )
 
         hidden_states = outputs.intermediate_hidden_states if return_dict else outputs[2]
         init_reference = outputs.init_reference_points if return_dict else outputs[0]
         inter_references = outputs.intermediate_reference_points if return_dict else outputs[3]
 
-        logits, pred_boxes, logits_semantic, predicted_depth = None, None, None, None
+        logits, pred_boxes_2d, pred_boxes_3d, pred_z_samples_offsets = None, None, None, None
+        # features = tuple(level[0] for level in outputs.backbone_features)
 
-        if "det2d" in self.config.tasks:
+        if any(task in self.config.tasks + self.config.train_tasks for task in [MultiformerTask.DET_2D, MultiformerTask.DET_3D]):
             # class logits + predicted bounding boxes
             outputs_classes = []
-            outputs_coords = []
+            outputs_coords_2d = []
+            outputs_boxes_3d = []
+            outputs_z_samples_offsets = []
 
             for level in range(hidden_states.shape[1]):
+                if not self.config.auxiliary_loss and level != hidden_states.shape[1] - 1:
+                    continue
                 if level == 0:
                     reference = init_reference
                 else:
                     reference = inter_references[:, level - 1]
                 reference = inverse_sigmoid(reference)
                 outputs_class = self.class_embed[level](hidden_states[:, level])
-                delta_bbox = self.bbox_embed[level](hidden_states[:, level])
-                if reference.shape[-1] == 4:
-                    outputs_coord_logits = delta_bbox + reference
-                elif reference.shape[-1] == 2:
-                    delta_bbox[..., :2] += reference
-                    outputs_coord_logits = delta_bbox
-                else:
-                    raise ValueError(f"reference.shape[-1] should be 4 or 2, but got {reference.shape[-1]}")
-                outputs_coord = outputs_coord_logits.sigmoid()
                 outputs_classes.append(outputs_class)
-                outputs_coords.append(outputs_coord)
+
+                if MultiformerTask.DET_2D in self.config.tasks + self.config.train_tasks:
+                    delta_bbox = self.bbox_embed[level](hidden_states[:, level])
+                    if reference.shape[-1] == 4:
+                        outputs_coord_logits = delta_bbox + reference
+                    elif reference.shape[-1] == 2:
+                        delta_bbox[..., :2] += reference
+                        outputs_coord_logits = delta_bbox
+                    else:
+                        raise ValueError(f"reference.shape[-1] should be 4 or 2, but got {reference.shape[-1]}")
+                    outputs_coord_2d = outputs_coord_logits.sigmoid()
+                    outputs_coords_2d.append(outputs_coord_2d)
+
+                if MultiformerTask.DET_3D in self.config.tasks + self.config.train_tasks:
+                    box_output = self.bbox3d_embed[level](hidden_states[:, level])
+                    center_coord_logits = box_output[..., :2] + reference
+                    z_offset = box_output[..., 2].unsqueeze(-1)
+                    z_sample = nn.functional.grid_sample(
+                        outputs.predicted_depth.unsqueeze(1),
+                        center_coord_logits.tanh().unsqueeze(-2),
+                        align_corners=False,
+                        padding_mode="reflection",
+                    ).squeeze(1)
+                    center_coord_2d = center_coord_logits.sigmoid()
+                    z_combined = z_sample + z_offset
+                    uv = center_coord_2d * torch.tensor(pixel_values.transpose(-1, -2).shape[-2:]).to(self.device)
+                    uv1 = torch.cat([uv, torch.ones_like(uv[..., :1])], dim=-1)
+                    xyz = (torch.linalg.inv(intrinsics) @ uv1.transpose(-1, -2)) * torch.exp(z_combined).transpose(-1, -2)
+                    num_heading_bins = self.config.det3d_num_heading_bins
+                    heading_scores = box_output[..., 3:num_heading_bins+3]
+                    heading_residuals_normalized = box_output[..., num_heading_bins+3:num_heading_bins*2+3]
+                    size_scores = box_output[..., -4*self.config.num_labels:-3*self.config.num_labels]
+                    size_residuals_normalized = box_output[..., -3*self.config.num_labels:]
+                    output_boxes_3d = torch.cat(
+                        tensors=[
+                            center_coord_2d,
+                            xyz.transpose(-1, -2),
+                            heading_scores,
+                            heading_residuals_normalized,
+                            size_scores,
+                            size_residuals_normalized,
+                        ],
+                        dim=-1
+                    )
+                    z_sample_offsets = torch.cat([z_sample, z_offset], dim=-1)
+
+                    outputs_boxes_3d.append(output_boxes_3d)
+                    outputs_z_samples_offsets.append(z_sample_offsets)
+
             outputs_class = torch.stack(outputs_classes)
-            outputs_coord = torch.stack(outputs_coords)
-
             logits = outputs_class[-1]
-            pred_boxes = outputs_coord[-1]
 
-        features = tuple(level[0] for level in outputs.backbone_features)
+            if len(outputs_coords_2d) > 0:
+                outputs_coord_2d = torch.stack(outputs_coords_2d)
+                pred_boxes_2d = outputs_coord_2d[-1]
 
-        if "semseg" in self.config.tasks:
-            logits_semantic = self.semantic_head(features)
-        if "depth" in self.config.tasks:
-            depth_decoder_out = self.depth_decoder(features)
-            predicted_depth = self.depth_head(depth_decoder_out)
+            if len(outputs_boxes_3d) > 0:
+                outputs_boxes_3d = torch.stack(outputs_boxes_3d)
+                pred_boxes_3d = outputs_boxes_3d[-1]
+
+            if len(outputs_z_samples_offsets) > 0:
+                outputs_z_samples_offsets = torch.stack(outputs_z_samples_offsets)
+                pred_z_samples_offsets = outputs_z_samples_offsets[-1]
 
         loss = {}
-        if labels_semantic is not None and "semseg" in self.config.tasks:
-            # upsample logits to the images' original size
-            upsampled_logits = torch.nn.functional.interpolate(
-                logits_semantic, size=labels_semantic.shape[-2:], mode="bilinear", align_corners=False
-            )
-            if self.config.num_labels > 1:
-                loss_fct = CrossEntropyLoss(
-                    ignore_index=self.config.semantic_loss_ignore_index, weight=self.class_loss_weights
-                )
-                labels_loss = loss_fct(upsampled_logits, labels_semantic)
-            elif self.config.num_labels == 1:
-                valid_mask = (
-                    (labels_semantic >= 0) & (labels_semantic != self.config.semantic_loss_ignore_index)
-                ).float()
-                loss_fct = BCEWithLogitsLoss(reduction="none")
-                labels_loss = loss_fct(upsampled_logits.squeeze(1), labels_semantic.float())
-                labels_loss = (labels_loss * valid_mask).mean()
+        if "semseg" in self.config.train_tasks:
+            if labels_semantic is None:
+                warnings.warn("'semseg' is selected as a training task, but no semantic labels loaded for frame.")
             else:
-                raise ValueError(f"Number of labels should be >=0: {self.config.num_labels}")
+                # upsample logits to the images' original size
+                upsampled_logits = torch.nn.functional.interpolate(
+                    outputs.logits_semantic, size=labels_semantic.shape[-2:], mode="bilinear", align_corners=False
+                )
+                if self.config.num_labels > 1:
+                    loss_fct = CrossEntropyLoss(
+                        ignore_index=self.config.semantic_loss_ignore_index, weight=self.class_loss_weights
+                    )
+                    labels_loss = loss_fct(upsampled_logits, labels_semantic)
+                elif self.config.num_labels == 1:
+                    valid_mask = (
+                        (labels_semantic >= 0) & (labels_semantic != self.config.semantic_loss_ignore_index)
+                    ).float()
+                    loss_fct = BCEWithLogitsLoss(reduction="none")
+                    labels_loss = loss_fct(upsampled_logits.squeeze(1), labels_semantic.float())
+                    labels_loss = (labels_loss * valid_mask).mean()
+                else:
+                    raise ValueError(f"Number of labels should be >=0: {self.config.num_labels}")
 
-            loss[MultiformerTask.SEMSEG] = labels_loss
+                loss[MultiformerTask.SEMSEG] = labels_loss
 
-        if labels_depth is not None and "depth" in self.config.tasks:
-            loss_fct = DepthTrainLoss(silog_lambda=self.config.silog_lambda)
-            # Labels are converted to log by loss function, model inference is in log depth
-            loss[MultiformerTask.DEPTH] = loss_fct(predicted_depth, labels_depth)
+        if "depth" in self.config.train_tasks:
+            if labels_depth is None:
+                warnings.warn("'depth' is selected as a training task, but no depth labels loaded for frame.")
+            else:
+                loss_fct = DepthTrainLoss(silog_lambda=self.config.silog_lambda)
+                # Labels are converted to log by loss function, model inference is in log depth
+                loss[MultiformerTask.DEPTH] = loss_fct(outputs.predicted_depth, labels_depth)
 
         # loss, loss_dict, auxiliary_outputs = None, None, None
         loss_dict, auxiliary_outputs = None, None
-        if labels is not None:
-            # First: create the matcher
-            matcher = DeformableDetrHungarianMatcher(
-                class_cost=self.config.class_cost, bbox_cost=self.config.bbox_cost, giou_cost=self.config.giou_cost
-            )
-            # Second: create the criterion
-            losses = ["labels", "boxes", "cardinality"]
-            criterion = DeformableDetrLoss(
-                matcher=matcher,
-                num_classes=self.config.num_labels,
-                focal_alpha=self.config.focal_alpha,
-                losses=losses,
-                keep_box_prob=self.config.det2d_box_keep_prob,
-            )
-            criterion.to(self.device)
-            # Third: compute the losses, based on outputs and labels
-            outputs_loss = {}
-            outputs_loss["logits"] = logits
-            outputs_loss["pred_boxes"] = pred_boxes
-            if self.config.auxiliary_loss:
-                auxiliary_outputs = self._set_aux_loss(outputs_class, outputs_coord)
-                outputs_loss["auxiliary_outputs"] = auxiliary_outputs
-            if self.config.two_stage:
-                enc_outputs_coord = outputs.enc_outputs_coord_logits.sigmoid()
-                outputs_loss["enc_outputs"] = {"logits": outputs.enc_outputs_class, "pred_boxes": enc_outputs_coord}
+        if labels is not None and any(task in self.config.train_tasks for task in [MultiformerTask.DET_2D, MultiformerTask.DET_3D]):
+            if labels is None:
+                if MultiformerTask.DET_2D in self.config.train_tasks:
+                    warnings.warn("'det2d' listed as a training task, but no box2d labels loaded for frame.")
+                if MultiformerTask.DET_3D in self.config.train_tasks:
+                    warnings.warn("'det3d' requires box2d labels to train, but none loaded for frame.")
+            else:
+                # First: create the matcher
+                matcher = DeformableDetrHungarianMatcher(
+                    class_cost=self.config.class_cost, bbox_cost=self.config.bbox_cost, giou_cost=self.config.giou_cost
+                )
+                # Second: create the criterion
+                losses = ["labels", "boxes", "cardinality"]
+                criterion = DeformableDetrLoss(
+                    matcher=matcher,
+                    num_classes=self.config.num_labels,
+                    focal_alpha=self.config.focal_alpha,
+                    losses=losses,
+                    keep_box_prob=self.config.det2d_box_keep_prob,
+                )
+                criterion.to(self.device)
+                # Third: compute the losses, based on outputs and labels
+                outputs_loss = {}
+                outputs_loss["logits"] = logits
+                outputs_loss["pred_boxes"] = pred_boxes_2d
+                if self.config.auxiliary_loss:
+                    auxiliary_outputs = self._set_aux_loss(outputs_class, outputs_coord_2d)
+                    outputs_loss["auxiliary_outputs"] = auxiliary_outputs
+                if self.config.two_stage:
+                    enc_outputs_coord = outputs.enc_outputs_coord_logits.sigmoid()
+                    outputs_loss["enc_outputs"] = {"logits": outputs.enc_outputs_class, "pred_boxes": enc_outputs_coord}
 
-            loss_dict = criterion(outputs_loss, labels)
-            # Fourth: compute total loss, as a weighted sum of the various losses
-            weight_dict = {"loss_ce": 1, "loss_bbox": self.config.bbox_loss_coefficient}
-            weight_dict["loss_giou"] = self.config.giou_loss_coefficient
-            if self.config.auxiliary_loss:
-                aux_weight_dict = {}
-                for i in range(self.config.decoder_layers - 1):
-                    aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})
-                weight_dict.update(aux_weight_dict)
-            loss[MultiformerTask.DET_2D] = sum(
-                loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict
-            )
+                loss_dict, indices = criterion(outputs_loss, labels)
+                # Fourth: compute total loss, as a weighted sum of the various losses
+                weight_dict = {
+                    "loss_ce": 1,
+                    "loss_bbox": self.config.bbox_loss_coefficient,
+                    "loss_giou": self.config.giou_loss_coefficient,
+                }
+                if self.config.auxiliary_loss:
+                    aux_weight_dict = {}
+                    for i in range(self.config.decoder_layers - 1):
+                        aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})
+                    weight_dict.update(aux_weight_dict)
+
+                if MultiformerTask.DET_2D in self.config.train_tasks:
+                    loss[MultiformerTask.DET_2D] = sum(
+                        loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict
+                    )
+
+                if MultiformerTask.DET_3D in self.config.train_tasks:
+                    if labels_3d is None:
+                        warnings.warn("'det3d' listed as training tasks, but no box3d labels found for frame.")
+                    else:
+                        criterion_3d = MultiformerDet3DLoss(self.config, self.type_mean_size_array)
+                        image_size_wh = torch.cat([pixel_mask.sum(-1)[:, -1:], pixel_mask.sum(-2)[:, -1:]], -1)
+                        total_loss_3d, loss_dict_3d = criterion_3d(
+                            pred_boxes_3d,
+                            labels_3d,
+                            indices,
+                            intrinsics,
+                            image_size_wh,
+                            pred_z_samples_offsets,
+                        )
+                        loss[MultiformerTask.DET_3D] = total_loss_3d
+                        loss_dict.update(loss_dict_3d)
 
         if not return_dict:
             if auxiliary_outputs is not None:
-                output = (logits, pred_boxes) + auxiliary_outputs + outputs
+                output = (logits, pred_boxes_2d) + auxiliary_outputs + outputs
             else:
-                output = (logits, pred_boxes) + outputs
+                output = (logits, pred_boxes_2d) + outputs
             tuple_outputs = ((loss, loss_dict) + output) if loss is not None else output
 
             return tuple_outputs
@@ -2198,9 +2388,10 @@ class Multiformer(DeformableDetrPreTrainedModel):
             loss=loss,
             loss_dict=loss_dict,
             logits=logits,
-            pred_boxes=pred_boxes,
-            logits_semantic=logits_semantic,
-            pred_depth=predicted_depth,
+            pred_boxes=pred_boxes_2d,
+            pred_boxes_3d=pred_boxes_3d,
+            logits_semantic=outputs.logits_semantic,
+            pred_depth=outputs.predicted_depth,
             auxiliary_outputs=auxiliary_outputs,
             last_hidden_state=outputs.last_hidden_state,
             decoder_hidden_states=outputs.decoder_hidden_states,
@@ -2359,6 +2550,167 @@ class DepthTrainLoss(torch.nn.Module):
             results = self.losses[loss]["func"](y_hat, y) * self.losses[loss]["weight"]
 
         return torch.sum(results)
+
+
+def boxes3d_to_corners3d_torch(boxes3d, flip=False):
+    """
+    :param boxes3d: (N, 7) [x, y, z, h, w, l, ry]
+    :return: corners_rotated: (N, 8, 3)
+    """
+    device = boxes3d.device
+    boxes_num = boxes3d.shape[0]
+    h, w, l, ry = boxes3d[:, 3:4], boxes3d[:, 4:5], boxes3d[:, 5:6], boxes3d[:, 6:7]
+    if flip:
+        ry = ry + torch.pi
+    centers = boxes3d[:, 0:3]
+    zeros = torch.FloatTensor(boxes_num, 1).fill_(0).to(device)
+    ones = torch.FloatTensor(boxes_num, 1).fill_(1).to(device)
+
+    x_corners = torch.cat([l / 2., l / 2., -l / 2., -l / 2., l / 2., l / 2., -l / 2., -l / 2.], dim=1)  # (N, 8)
+    y_corners = torch.cat([zeros, zeros, zeros, zeros, -h, -h, -h, -h], dim=1)  # (N, 8)
+    z_corners = torch.cat([w / 2., -w / 2., -w / 2., w / 2., w / 2., -w / 2., -w / 2., w / 2.], dim=1)  # (N, 8)
+    corners = torch.cat((x_corners.unsqueeze(dim=1), y_corners.unsqueeze(dim=1), z_corners.unsqueeze(dim=1)), dim=1) # (N, 3, 8)
+
+    cosa, sina = torch.cos(ry), torch.sin(ry)
+    raw_1 = torch.cat([cosa, zeros, sina], dim=1)
+    raw_2 = torch.cat([zeros, ones, zeros], dim=1)
+    raw_3 = torch.cat([-sina, zeros, cosa], dim=1)
+    R = torch.cat((raw_1.unsqueeze(dim=1), raw_2.unsqueeze(dim=1), raw_3.unsqueeze(dim=1)), dim=1)  # (N, 3, 3)
+
+    corners_rotated = torch.matmul(R, corners)  # (N, 3, 8)
+    corners_rotated = corners_rotated + centers.unsqueeze(dim=2).expand(-1, -1, 8)
+    corners_rotated = corners_rotated.permute(0, 2, 1)
+    return corners_rotated
+
+
+class MultiformerDet3DLoss(nn.Module):
+
+    def __init__(self, config: MultiformerConfig, type_mean_size_array: Tensor, box_loss_weight=1.0, corner_loss_weight=0.1):
+        super().__init__()
+        self.config = config
+        self.type_mean_size_array = type_mean_size_array
+        self.box_loss_weight = box_loss_weight
+        self.corner_loss_weight = corner_loss_weight
+
+    def forward(self, boxes, labels_3d, indices, intrinsics, image_size_wh, z_samples_offsets):
+        # Adapted from https://github.com/xinzhuma/patchnet/blob/fbff77fa6cc9cf108f475a97440d16c5a37a6b9f/lib/losses/patchnet_loss.py
+        batch_size = len(labels_3d)
+        assert batch_size == boxes.shape[0] == len(indices)
+        device = boxes.device
+
+        center_pred = torch.cat([boxes[i, indices[i][0], 2:5] for i in range(batch_size)])
+        center_gt = torch.cat([labels_3d[i]["boxes3d"][indices[i][1]][:, :3] for i in range(batch_size)])
+        center_loss = F.l1_loss(center_pred, center_gt)
+
+        z_gt = torch.log(center_gt[..., 2])
+        z_samples = torch.cat([z_samples_offsets[i, indices[i][0], 0] for i in range(batch_size)])
+        z_offsets_pred = torch.cat([z_samples_offsets[i, indices[i][0], 1] for i in range(batch_size)])
+        z_offsets_gt = z_gt - z_samples
+        z_offset_loss = F.l1_loss(z_offsets_pred, z_offsets_gt)
+
+        center_2d_pred = torch.cat([boxes[i, indices[i][0], :2] for i in range(batch_size)])
+        center_2d_label = torch.cat(
+            [
+                (intrinsics[i] @ labels_3d[i]["boxes3d"][indices[i][1]][:, :3].T).T[..., :2] / image_size_wh[i]
+                for i in range(batch_size)
+            ]
+        ) / center_gt[:, 2, None]
+        center_2d_loss = F.l1_loss(center_2d_pred, center_2d_label)
+
+        num_heading_bins = self.config.det3d_num_heading_bins
+
+        # Heading bin classification loss
+        heading_class_pred = torch.cat([boxes[i, indices[i][0], 5:num_heading_bins + 5] for i in range(batch_size)])
+        heading_class_label = torch.cat([labels_3d[i]["heading_class_labels"][indices[i][1]].long() for i in range(batch_size)])
+        heading_class_loss = F.cross_entropy(heading_class_pred, heading_class_label)
+
+        # Normalized heading residual loss
+        hcls_onehot = torch.zeros_like(heading_class_pred).scatter_(
+            dim=1, index=heading_class_label.view(-1, 1), value=1)
+        heading_residual_label = torch.cat([labels_3d[i]["heading_residual_labels"][indices[i][1]] for i in range(batch_size)])
+        # heading_residual_label = heading_residual_label.float()
+        heading_residual_normalized_label = heading_residual_label / (torch.pi / num_heading_bins)
+        heading_residual_normalized_pred = torch.cat([boxes[i, indices[i][0], 5+num_heading_bins:5+2*num_heading_bins] for i in range(batch_size)])
+        heading_residual_normalized = torch.sum(heading_residual_normalized_pred * hcls_onehot, 1)
+        heading_residual_normalized_loss = F.l1_loss(heading_residual_normalized, heading_residual_normalized_label)
+
+        # Size loss. Assumes that each box class has its own size class
+        size_class_label = torch.cat([labels_3d[i]["class_labels"][indices[i][1]] for i in range(batch_size)])
+        size_class_loss = None
+        if self.config.det3d_predict_class:
+            size_scores = torch.cat([boxes[i, indices[i][0], -4*self.config.num_labels:-3*self.config.num_labels] for i in range(batch_size)])
+            size_class_loss = F.cross_entropy(size_scores, size_class_label.long())
+        scls_onehot = torch.zeros(size_class_label.shape[0], self.config.num_labels).to(device).scatter_(
+            dim=1, index=size_class_label.long().view(-1, 1), value=1
+        )
+        scls_onehot = scls_onehot.view(size_class_label.shape[0], self.config.num_labels, 1).repeat(1, 1, 3)
+        size_residual_normalized_pred = torch.cat([boxes[i, indices[i][0], -3*self.config.num_labels:] for i in range(batch_size)])
+        size_residual_normalized = torch.sum(size_residual_normalized_pred.view(scls_onehot.shape) * scls_onehot, 1)
+
+        type_mean_size_array = self.type_mean_size_array.to(device)
+        mean_size_label = torch.sum(type_mean_size_array * scls_onehot, 1)
+        size_residual_label = torch.cat([labels_3d[i]["size_residual_labels"][indices[i][1]] for i in range(batch_size)])
+        size_residual_label_normalized = size_residual_label / mean_size_label
+        size_residual_normalized_loss = F.l1_loss(size_residual_label_normalized, size_residual_normalized)
+
+        # Corner loss
+        size_residuals = size_residual_normalized_pred.view(scls_onehot.shape) * type_mean_size_array
+        size_pred = size_residuals + type_mean_size_array
+        size_pred = torch.sum(size_pred * scls_onehot, 1)
+
+        # true pred heading
+        heading_bin_centers = torch.arange(0, 2 * torch.pi, 2 * torch.pi / num_heading_bins).to(device)
+        heading_pred = heading_residual_normalized_pred * (torch.pi / num_heading_bins) + heading_bin_centers
+        heading_pred = torch.sum(heading_pred * hcls_onehot, 1)
+
+        # true heading label
+        heading_label = heading_residual_label.view(-1, 1) + heading_bin_centers.view(1, -1)
+        heading_label = torch.sum(hcls_onehot * heading_label, -1)
+
+        # size true label
+        size_label = torch.sum(type_mean_size_array * scls_onehot, 1) + size_residual_label
+        size_label = size_label.float()
+
+        # corners_3d estimate
+        box3d_pred = torch.cat([center_pred, size_pred, heading_pred.view(-1, 1)], 1)
+        corners_3d_pred = boxes3d_to_corners3d_torch(box3d_pred)
+
+        # true 3d corners
+        box3d = torch.cat([center_gt, size_label, heading_label.view(-1, 1)], 1)
+        corners_3d_gt = boxes3d_to_corners3d_torch(box3d)
+        corners_3d_gt_flip = boxes3d_to_corners3d_torch(box3d, flip=True)
+
+        # corner loss
+        corners_loss = torch.min(F.l1_loss(corners_3d_pred, corners_3d_gt),
+                                 F.l1_loss(corners_3d_pred, corners_3d_gt_flip))
+
+        loss_dict = {
+            "box3d_center_2d_l1_loss": center_2d_loss,
+            "box3d_center_3d_l1_loss": center_loss,
+            "box3d_z_offset_l1_loss": z_offset_loss,
+            "box3d_heading_class_loss": heading_class_loss,
+            "box3d_heading_residual_loss": heading_residual_normalized_loss,
+            "box3d_size_residual_loss": size_residual_normalized_loss,
+            "box3d_corners_loss": corners_loss,
+        }
+
+        combined_loss = (
+                center_2d_loss +
+                z_offset_loss +
+                center_loss * 0.1 +
+                heading_class_loss +
+                heading_residual_normalized_loss * 10 +
+                size_residual_normalized_loss * 10 +
+                self.corner_loss_weight * corners_loss
+        )
+
+        if size_class_loss is not None:
+            loss_dict["box3d_size_class_loss"] = size_class_loss
+            combined_loss += size_class_loss
+
+        total_loss = self.box_loss_weight * combined_loss
+
+        return total_loss, loss_dict
 
 
 class DeformableDetrLoss(nn.Module):
@@ -2541,7 +2893,7 @@ class DeformableDetrLoss(nn.Module):
                 l_dict = {k + "_enc": v for k, v in l_dict.items()}
                 losses.update(l_dict)
 
-        return losses
+        return losses, indices
 
 
 # Copied from transformers.models.detr.modeling_detr.DetrMLPPredictionHead

@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Deformable DETR model configuration"""
+"""Multiformer model configuration"""
 from typing import Sequence
 
 from ... import PvtV2Config
@@ -176,7 +176,10 @@ class MultiformerConfig(PretrainedConfig):
 
     def __init__(
         self,
-        tasks=["semseg", "depth", "det2d"],
+        tasks=["semseg", "depth", "det_2d"],
+        train_tasks=["semseg", "depth", "det_2d"],
+        omit_heads=["det_3d"],
+        train_backbone=True,
         use_timm_backbone=False,
         backbone_config=PvtV2Config(
             mlp_ratios=[4, 4, 4, 4],
@@ -219,6 +222,11 @@ class MultiformerConfig(PretrainedConfig):
         det2d_input_proj_groups=32,
         det2d_use_pos_embed=True,
         det2d_box_keep_prob=0.5,
+        det2d_fuse_semantic=False,
+        det2d_fuse_depth=False,
+        det3d_num_heading_bins=12,
+        det3d_type_mean_sizes=None,
+        det3d_predict_class=False,
         encoder_n_points=4,
         decoder_n_points=4,
         two_stage=False,
@@ -298,6 +306,9 @@ class MultiformerConfig(PretrainedConfig):
             raise TypeError("det2d_input_proj_pads must be Sequence, got {}".format(type(det2d_input_proj_pads)))
 
         self.tasks = tasks
+        self.train_tasks = train_tasks
+        self.omit_heads = [] if omit_heads is None else omit_heads
+        self.train_backbone = train_backbone
         self.use_timm_backbone = use_timm_backbone
         self.backbone_config = backbone_config
         self.num_channels = num_channels
@@ -335,6 +346,10 @@ class MultiformerConfig(PretrainedConfig):
         self.det2d_input_proj_groups = det2d_input_proj_groups
         self.det2d_use_pos_embed = det2d_use_pos_embed
         self.det2d_box_keep_prob = det2d_box_keep_prob
+        self.det2d_fuse_semantic = det2d_fuse_semantic
+        self.det2d_fuse_depth = det2d_fuse_depth
+        self.det3d_num_heading_bins = det3d_num_heading_bins
+        self.det3d_predict_class = det3d_predict_class
         self.encoder_n_points = encoder_n_points
         self.decoder_n_points = decoder_n_points
         self.two_stage = two_stage
@@ -356,6 +371,7 @@ class MultiformerConfig(PretrainedConfig):
         self.disable_custom_kernels = disable_custom_kernels
         self.frozen_batch_norm = frozen_batch_norm
         super().__init__(is_encoder_decoder=is_encoder_decoder, **kwargs)
+        self.det3d_type_mean_sizes = det3d_type_mean_sizes if det3d_type_mean_sizes is not None else {l: [1, 1, 1] for l in self.id2label.values()}
 
     @property
     def num_attention_heads(self) -> int:
