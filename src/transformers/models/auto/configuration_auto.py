@@ -78,6 +78,7 @@ CONFIG_MAPPING_NAMES = OrderedDict(
         ("deit", "DeiTConfig"),
         ("deta", "DetaConfig"),
         ("detr", "DetrConfig"),
+        ("dill_clip_vision_model", "DillCLIPVisionConfig"),
         ("dinat", "DinatConfig"),
         ("dinov2", "Dinov2Config"),
         ("distilbert", "DistilBertConfig"),

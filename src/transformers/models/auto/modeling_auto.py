@@ -81,6 +81,7 @@ MODEL_MAPPING_NAMES = OrderedDict(
         ("deit", "DeiTModel"),
         ("deta", "DetaModel"),
         ("detr", "DetrModel"),
+        ("dill_clip_vision_model", "DillCLIPVisionModel"),
         ("dinat", "DinatModel"),
         ("dinov2", "Dinov2Model"),
         ("distilbert", "DistilBertModel"),
