@@ -310,6 +310,7 @@ CONFIG_ARCHIVE_MAP_MAPPING_NAMES = OrderedDict(
         ("deit", "DEIT_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("deta", "DETA_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("detr", "DETR_PRETRAINED_CONFIG_ARCHIVE_MAP"),
+        ("dill_clip", "DILL_CLIP_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("dinat", "DINAT_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("dinov2", "DINOV2_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("distilbert", "DISTILBERT_PRETRAINED_CONFIG_ARCHIVE_MAP"),
@@ -534,6 +535,7 @@ MODEL_NAMES_MAPPING = OrderedDict(
         ("deta", "DETA"),
         ("detr", "DETR"),
         ("dialogpt", "DialoGPT"),
+        ("dill_clip_vision_model", "DillCLIPVisionModel"),
         ("dinat", "DiNAT"),
         ("dinov2", "DINOv2"),
         ("distilbert", "DistilBERT"),
@@ -764,6 +766,7 @@ SPECIAL_MODEL_TYPE_TO_MODULE_NAME = OrderedDict(
         ("maskformer-swin", "maskformer"),
         ("xclip", "x_clip"),
         ("clip_vision_model", "clip"),
+        ("dill_clip_vision_model", "dill_clip"),
         ("siglip_vision_model", "siglip"),
     ]
 )
