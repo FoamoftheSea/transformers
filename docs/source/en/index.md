@@ -233,6 +233,7 @@ Flax), PyTorch, and/or TensorFlow.
 |                           [PVT](model_doc/pvt)                           |       ✅        |         ❌         |      ❌      |
 |                        [PVTv2](model_doc/pvt_v2)                         |       ✅        |         ❌         |      ❌      |
 |                       [QDQBert](model_doc/qdqbert)                       |       ✅        |         ❌         |      ❌      |
+|                         [Qwen2](model_doc/qwen2)                         |       ✅        |         ❌         |      ❌      |
 |                           [RAG](model_doc/rag)                           |       ✅        |         ✅         |      ❌      |
 |                         [REALM](model_doc/realm)                         |       ✅        |         ❌         |      ❌      |
 |                      [Reformer](model_doc/reformer)                      |       ✅        |         ❌         |      ❌      |
@@ -296,6 +297,7 @@ Flax), PyTorch, and/or TensorFlow.
 |                          [VITS](model_doc/vits)                          |       ✅        |         ❌         |      ❌      |
 |                         [ViViT](model_doc/vivit)                         |       ✅        |         ❌         |      ❌      |
 |                      [Wav2Vec2](model_doc/wav2vec2)                      |       ✅        |         ✅         |      ✅      |
+|                 [Wav2Vec2-BERT](model_doc/wav2vec2-bert)                 |       ✅        |         ❌         |      ❌      |
 |            [Wav2Vec2-Conformer](model_doc/wav2vec2-conformer)            |       ✅        |         ❌         |      ❌      |
 |              [Wav2Vec2Phoneme](model_doc/wav2vec2_phoneme)               |       ✅        |         ✅         |      ✅      |
 |                         [WavLM](model_doc/wavlm)                         |       ✅        |         ❌         |      ❌      |
