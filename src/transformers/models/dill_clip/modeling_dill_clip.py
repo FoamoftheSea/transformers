@@ -6,7 +6,7 @@ from torch import nn
 from transformers import DeformableDetrModel, add_start_docstrings, DeformableDetrPreTrainedModel, DillCLIPVisionConfig
 from transformers.models.deformable_detr.modeling_deformable_detr import _get_clones, DeformableDetrModelOutput, \
     _CONFIG_FOR_DOC
-from transformers.utils import add_start_docstrings_to_model_forward, replace_return_docstrings
+from transformers.utils import add_start_docstrings_to_model_forward, replace_return_docstrings, ModelOutput
 
 DILL_CLIP_PRETRAINED_MODEL_ARCHIVE_LIST = [
     "FoamoftheSea/dill-clip-b5",
@@ -70,11 +70,68 @@ DILL_CLIP_INPUTS_DOCSTRING = r"""
 
 
 @dataclass
-class DillCLIPVisionModelForRegressionOutput(DeformableDetrModelOutput):
+class DillCLIPVisionModelForRegressionOutput(ModelOutput):
+    """
+    Base class for outputs of the DillCLIP Vision model.
+
+    Args:
+        loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` are provided)):
+            Total loss as a linear combination of a negative log-likehood (cross-entropy) for class prediction and a
+            bounding box loss. The latter is defined as a linear combination of the L1 loss and the generalized
+            scale-invariant IoU loss.
+        loss_dict (`Dict`, *optional*):
+            A dictionary containing the individual losses. Useful for logging.
+        last_hidden_state (`torch.FloatTensor` of shape `(batch_size, num_queries, hidden_size)`):
+            Sequence of hidden-states at the output of the last layer of the decoder of the model.
+        intermediate_hidden_states (`torch.FloatTensor` of shape `(batch_size, config.decoder_layers, num_queries, hidden_size)`):
+            Stacked intermediate hidden states (output of each layer of the decoder).
+        intermediate_reference_points (`torch.FloatTensor` of shape `(batch_size, config.decoder_layers, num_queries, 4)`):
+            Stacked intermediate reference points (reference points of each layer of the decoder).
+        decoder_hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for the output of the embeddings + one for the output of each layer) of
+            shape `(batch_size, num_queries, hidden_size)`. Hidden-states of the decoder at the output of each layer
+            plus the initial embedding outputs.
+        decoder_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, num_queries,
+            num_queries)`. Attentions weights of the decoder, after the attention softmax, used to compute the weighted
+            average in the self-attention heads.
+        cross_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_queries, num_heads, 4, 4)`.
+            Attentions weights of the decoder's cross-attention layer, after the attention softmax, used to compute the
+            weighted average in the cross-attention heads.
+        encoder_last_hidden_state (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*):
+            Sequence of hidden-states at the output of the last layer of the encoder of the model.
+        encoder_hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for the output of the embeddings + one for the output of each layer) of
+            shape `(batch_size, sequence_length, hidden_size)`. Hidden-states of the encoder at the output of each
+            layer plus the initial embedding outputs.
+        encoder_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_queries, num_heads, 4, 4)`.
+            Attentions weights of the encoder, after the attention softmax, used to compute the weighted average in the
+            self-attention heads.
+        init_reference_points (`torch.FloatTensor` of shape  `(batch_size, num_queries, 4)`):
+            Initial reference points sent through the Transformer decoder.
+        enc_outputs_class (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.num_labels)`, *optional*, returned when `config.with_box_refine=True` and `config.two_stage=True`):
+            Predicted bounding boxes scores where the top `config.two_stage_num_proposals` scoring bounding boxes are
+            picked as region proposals in the first stage. Output of bounding box binary classification (i.e.
+            foreground and background).
+        enc_outputs_coord_logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, 4)`, *optional*, returned when `config.with_box_refine=True` and `config.two_stage=True`):
+            Logits of predicted bounding boxes coordinates in the first stage.
+    """
     loss: Optional[torch.FloatTensor] = None
     loss_dict: Optional[Dict] = None
-    last_hidden_state: torch.FloatTensor = None
-
+    last_hidden_state: Optional[torch.FloatTensor] = None
+    intermediate_hidden_states: Optional[torch.FloatTensor] = None
+    intermediate_reference_points: Optional[torch.FloatTensor] = None
+    decoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    decoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    cross_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    encoder_last_hidden_state: Optional[torch.FloatTensor] = None
+    encoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    encoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    init_reference_points: torch.FloatTensor = None
+    enc_outputs_class: Optional = None
+    enc_outputs_coord_logits: Optional = None
 
 @add_start_docstrings(
     """
@@ -89,8 +146,8 @@ class DillCLIPVisionModel(DeformableDetrModel):
 
 @add_start_docstrings(
     """
-    Dill-CLIP Model (consisting of a backbone and encoder-decoder Transformer) with regression head for minimizing loss
-    with expert soft targets. These soft targets should be the hidden states from a large expert CLIP model.
+    Dill-CLIP Model (consisting of a backbone and encoder-decoder Transformer) with l2 loss function related to
+    expert soft targets. These soft targets should be the target hidden states from a large expert CLIP model.
     """,
     DILL_CLIP_START_DOCSTRING,
 )
