@@ -156,6 +156,7 @@ class DillCLIPVisionConfig(PretrainedConfig):
         encoder_n_points=4,
         decoder_n_points=4,
         disable_custom_kernels=False,
+        layer_norm_eps=1e-5,
         **kwargs,
     ):
         if backbone_config is not None and use_timm_backbone:
@@ -198,6 +199,7 @@ class DillCLIPVisionConfig(PretrainedConfig):
         self.encoder_n_points = encoder_n_points
         self.decoder_n_points = decoder_n_points
         self.disable_custom_kernels = disable_custom_kernels
+        self.layer_norm_eps = layer_norm_eps
         super().__init__(is_encoder_decoder=is_encoder_decoder, **kwargs)
 
     @property
