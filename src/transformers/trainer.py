@@ -185,7 +185,6 @@ else:
 if is_safetensors_available():
     import safetensors.torch
 
-
 if is_peft_available():
     from peft import PeftModel
 
@@ -213,7 +212,15 @@ if is_accelerate_available():
 
 
 def _is_peft_model(model):
-    return is_peft_available() and isinstance(model, PeftModel)
+    if is_peft_available():
+        classes_to_check = (PeftModel,) if is_peft_available() else ()
+        # Here we also check if the model is an instance of `PeftMixedModel` introduced in peft>=0.7.0: https://github.com/huggingface/transformers/pull/28321
+        if version.parse(importlib.metadata.version("peft")) >= version.parse("0.7.0"):
+            from peft import PeftMixedModel
+
+            classes_to_check = (*classes_to_check, PeftMixedModel)
+        return isinstance(model, classes_to_check)
+    return False
 
 
 if TYPE_CHECKING:
@@ -700,7 +707,11 @@ class Trainer:
             # Inspect model forward signature to keep only the arguments it accepts.
             model_to_inspect = self.model
             if _is_peft_model(self.model):
-                model_to_inspect = self.model.get_base_model()
+                if hasattr(self.model, "get_base_model"):
+                    model_to_inspect = self.model.get_base_model()
+                else:
+                    # PeftMixedModel do not provide a `get_base_model` method
+                    model_to_inspect = self.model.base_model.model
             signature = inspect.signature(model_to_inspect.forward)
             self._signature_columns = list(signature.parameters.keys())
             # Labels may be named label or label_ids, the default data collator handles that.
@@ -2091,6 +2102,7 @@ class Trainer:
                 )
 
         if os.path.isfile(weights_file) or os.path.isfile(safe_weights_file) or is_fsdp_ckpt:
+            weights_only_kwarg = {"weights_only": True} if is_torch_greater_or_equal_than_1_13 else {}
             # If the model is on the GPU, it still works!
             if is_sagemaker_mp_enabled():
                 if os.path.isfile(os.path.join(resume_from_checkpoint, "user_content.pt")):
@@ -2109,7 +2121,7 @@ class Trainer:
                     state_dict = torch.load(
                         weights_file,
                         map_location="cpu",
-                        weights_only=is_torch_greater_or_equal_than_1_13,
+                        **weights_only_kwarg,
                     )
                     # Required for smp to not auto-translate state_dict from hf to smp (is already smp).
                     state_dict["_smp_is_partial"] = False
@@ -2126,7 +2138,7 @@ class Trainer:
                     state_dict = torch.load(
                         weights_file,
                         map_location="cpu",
-                        weights_only=is_torch_greater_or_equal_than_1_13,
+                        **weights_only_kwarg,
                     )
 
                 # workaround for FSDP bug https://github.com/pytorch/pytorch/issues/82963
@@ -2179,6 +2191,7 @@ class Trainer:
             or os.path.exists(best_safe_adapter_model_path)
         ):
             has_been_loaded = True
+            weights_only_kwarg = {"weights_only": True} if is_torch_greater_or_equal_than_1_13 else {}
             if is_sagemaker_mp_enabled():
                 if os.path.isfile(os.path.join(self.state.best_model_checkpoint, "user_content.pt")):
                     # If the 'user_content.pt' file exists, load with the new smp api.
@@ -2198,7 +2211,7 @@ class Trainer:
                         state_dict = torch.load(
                             best_model_path,
                             map_location="cpu",
-                            weights_only=is_torch_greater_or_equal_than_1_13,
+                            **weights_only_kwarg,
                         )
 
                     state_dict["_smp_is_partial"] = False
@@ -2231,7 +2244,7 @@ class Trainer:
                         state_dict = torch.load(
                             best_model_path,
                             map_location="cpu",
-                            weights_only=is_torch_greater_or_equal_than_1_13,
+                            **weights_only_kwarg,
                         )
 
                     # If the model is on the GPU, it still works!
@@ -2370,7 +2383,7 @@ class Trainer:
         output_dir = os.path.join(run_dir, checkpoint_folder)
         if os.path.exists(output_dir) and len(os.listdir(output_dir)) > 0:
             logger.warning(
-                f"Checkpoint destination directory {output_dir} already exists and is non-empty."
+                f"Checkpoint destination directory {output_dir} already exists and is non-empty. "
                 "Saving will proceed but saved results may be invalid."
             )
             staging_output_dir = output_dir
@@ -2771,6 +2784,9 @@ class Trainer:
 
         with self.compute_loss_context_manager():
             loss = self.compute_loss(model, inputs)
+
+        del inputs
+        torch.cuda.empty_cache()
 
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu parallel training
@@ -3270,6 +3286,7 @@ class Trainer:
         all_inputs = None
         # Will be useful when we have an iterable dataset so don't know its length.
 
+        metrics = None
         observed_num_examples = 0
         # Main evaluation loop
         for step, inputs in enumerate(dataloader):
@@ -3337,6 +3354,8 @@ class Trainer:
                         labels if all_labels is None else nested_concat(all_labels, labels, padding_index=-100)
                     )
 
+                del losses_host, preds_host, inputs_host, labels_host
+                torch.cuda.empty_cache()
                 # Set back to None to begin a new accumulation
                 losses_host, preds_host, inputs_host, labels_host = None, None, None, None
 
@@ -3385,7 +3404,7 @@ class Trainer:
                 )
             else:
                 metrics = self.compute_metrics(EvalPrediction(predictions=all_preds, label_ids=all_labels))
-        else:
+        elif metrics is None:
             metrics = {}
 
         # To be JSON-serializable, we need to remove numpy types or zero-d tensors
@@ -3825,6 +3844,7 @@ class Trainer:
         preds_host: Union[torch.Tensor, List[torch.Tensor]] = None
         labels_host: Union[torch.Tensor, List[torch.Tensor]] = None
         inputs_host: Union[torch.Tensor, List[torch.Tensor]] = None
+        metrics: Optional[dict] = None
 
         world_size = max(1, args.world_size)
 
@@ -3866,8 +3886,25 @@ class Trainer:
                 )
             self.control = self.callback_handler.on_prediction_step(args, self.state, self.control)
 
-            # Gather all tensors and put them back on the CPU if we have done enough accumulation steps.
-            if args.eval_accumulation_steps is not None and (step + 1) % args.eval_accumulation_steps == 0:
+            if self.args.batch_eval_metrics:
+                if self.compute_metrics is not None and preds_host is not None and labels_host is not None:
+                    if args.include_inputs_for_metrics:
+                        metrics = self.compute_metrics(
+                            EvalPrediction(predictions=preds_host, label_ids=labels_host, inputs=inputs_host),
+                            compute_result=step == len(dataloader) - 1,
+                        )
+                    else:
+                        metrics = self.compute_metrics(EvalPrediction(predictions=preds_host, label_ids=labels_host))
+                del losses_host, preds_host, inputs_host, labels_host
+                torch.cuda.empty_cache()
+                losses_host, preds_host, inputs_host, labels_host = None, None, None, None
+
+            elif (
+                args.eval_accumulation_steps is not None
+                and (step + 1) % args.eval_accumulation_steps == 0
+                and self.accelerator.sync_gradients
+            ):
+                # Gather all tensors and put them back on the CPU if we have done enough accumulation steps.
                 eval_losses_gatherer.add_arrays(self._gather_and_numpify(losses_host, "eval_losses"))
                 if not prediction_loss_only:
                     preds_gatherer.add_arrays(self._gather_and_numpify(preds_host, "eval_preds"))
@@ -3875,6 +3912,8 @@ class Trainer:
                     inputs_gatherer.add_arrays(self._gather_and_numpify(inputs_host, "eval_inputs_ids"))
 
                 # Set back to None to begin a new accumulation
+                del losses_host, preds_host, labels_host, inputs_host
+                torch.cuda.empty_cache()
                 losses_host, preds_host, labels_host, inputs_host = None, None, None, None
 
         if args.past_index and hasattr(self, "_past"):
@@ -3900,7 +3939,7 @@ class Trainer:
                 )
             else:
                 metrics = self.compute_metrics(EvalPrediction(predictions=preds, label_ids=label_ids))
-        else:
+        elif metrics is None:
             metrics = {}
 
         # To be JSON-serializable, we need to remove numpy types or zero-d tensors
