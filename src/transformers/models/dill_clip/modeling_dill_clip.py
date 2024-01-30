@@ -87,6 +87,8 @@ class DillCLIPVisionModelForRegressionOutput(ModelOutput):
             scale-invariant IoU loss.
         loss_dict (`Dict`, *optional*):
             A dictionary containing the individual losses. Useful for logging.
+        targets (`List[int]`, *optional*):
+            List of target classes for eval metrics.
         last_hidden_state (`torch.FloatTensor` of shape `(batch_size, num_queries, hidden_size)`):
             Sequence of hidden-states at the output of the last layer of the decoder of the model.
         intermediate_hidden_states (`torch.FloatTensor` of shape `(batch_size, config.decoder_layers, num_queries, hidden_size)`):
@@ -125,8 +127,8 @@ class DillCLIPVisionModelForRegressionOutput(ModelOutput):
             Logits of predicted bounding boxes coordinates in the first stage.
     """
     loss: Optional[torch.FloatTensor] = None
-    targets: Optional[torch.LongTensor] = None
     loss_dict: Optional[Dict] = None
+    targets: Optional[torch.LongTensor] = None
     last_hidden_state: Optional[torch.FloatTensor] = None
     pooled_output: Optional[torch.FloatTensor] = None
     intermediate_hidden_states: Optional[torch.FloatTensor] = None
@@ -464,8 +466,8 @@ class DillCLIPVisionModelForRegression(DeformableDetrPreTrainedModel):
 
         dict_outputs = DillCLIPVisionModelForRegressionOutput(
             loss=loss,
-            targets=targets,
             loss_dict=loss_dict,
+            targets=targets,
             last_hidden_state=outputs.last_hidden_state,
             pooled_output=outputs.pooled_output,
             decoder_hidden_states=outputs.decoder_hidden_states,
