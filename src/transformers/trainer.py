@@ -81,6 +81,7 @@ from .trainer_pt_utils import (
     LabelSmoother,
     LengthGroupedSampler,
     SequentialDistributedSampler,
+    denest_and_itemize,
     distributed_broadcast_scalars,
     distributed_concat,
     find_batch_size,
@@ -129,6 +130,7 @@ from .utils import (
     SAFE_WEIGHTS_NAME,
     WEIGHTS_INDEX_NAME,
     WEIGHTS_NAME,
+    ModelOutput,
     PushInProgress,
     can_return_loss,
     find_labels,
@@ -1880,7 +1882,12 @@ class Trainer:
                     self.control = self.callback_handler.on_step_begin(args, self.state, self.control)
 
                 with self.accelerator.accumulate(model):
-                    tr_loss_step = self.training_step(model, inputs)
+                    if args.log_outputs:
+                        tr_loss_step, outputs = self.training_step(model, inputs, return_outputs=True)
+                        loss_dict = outputs.get("loss_dict", None)
+                    else:
+                        tr_loss_step = self.training_step(model, inputs)
+                        loss_dict = None
 
                 if (
                     args.logging_nan_inf_filter
@@ -1940,7 +1947,7 @@ class Trainer:
                     self.state.epoch = epoch + (step + 1 + steps_skipped) / steps_in_epoch
                     self.control = self.callback_handler.on_step_end(args, self.state, self.control)
 
-                    self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval)
+                    self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval, loss_dict)
                 else:
                     self.control = self.callback_handler.on_substep_end(args, self.state, self.control)
 
@@ -1955,7 +1962,7 @@ class Trainer:
                 self.control.should_training_stop = True
 
             self.control = self.callback_handler.on_epoch_end(args, self.state, self.control)
-            self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval)
+            self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval, loss_dict)
 
             if DebugOption.TPU_METRICS_DEBUG in self.args.debug:
                 if is_torch_tpu_available():
@@ -2278,12 +2285,12 @@ class Trainer:
                 f"There were unexpected keys in the checkpoint model loaded: {load_result.unexpected_keys}."
             )
 
-    def _maybe_log_save_evaluate(self, tr_loss, model, trial, epoch, ignore_keys_for_eval):
+    def _maybe_log_save_evaluate(self, tr_loss, model, trial, epoch, ignore_keys_for_eval, loss_dict=None):
         if self.control.should_log and self.state.global_step > self._globalstep_last_logged:
             if is_torch_tpu_available():
                 xm.mark_step()
 
-            logs: Dict[str, float] = {}
+            logs: Dict[str, Union[dict, float]] = {"loss": {}}
 
             # all_gather + mean() to get average loss over all processes
             tr_loss_scalar = self._nested_gather(tr_loss).mean().item()
@@ -2291,8 +2298,12 @@ class Trainer:
             # reset tr_loss to zero
             tr_loss -= tr_loss
 
-            logs["loss"] = round(tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged), 4)
+            train_loss = round(tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged), 4)
+            logs["loss"]["train_loss"] = train_loss
             logs["learning_rate"] = self._get_learning_rate()
+
+            if loss_dict is not None:
+                logs["loss"]["train_loss_dict"] = denest_and_itemize(loss_dict)
 
             self._total_loss_scalar += tr_loss_scalar
             self._globalstep_last_logged = self.state.global_step
@@ -2757,7 +2768,9 @@ class Trainer:
 
         return ctx_manager
 
-    def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
+    def training_step(
+            self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]], return_outputs: bool = False
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, ModelOutput]]:
         """
         Perform a training step on a batch of inputs.
 
@@ -2771,6 +2784,8 @@ class Trainer:
 
                 The dictionary will be unpacked before being fed to the model. Most models expect the targets under the
                 argument `labels`. Check your model's documentation for all accepted arguments.
+            return_outputs (`bool`, *optional*, defaults to False):
+                Set to `True` for logging the loss_dict produced by the model.
 
         Return:
             `torch.Tensor`: The tensor with training loss on this batch.
@@ -2783,7 +2798,10 @@ class Trainer:
             return loss_mb.reduce_mean().detach().to(self.args.device)
 
         with self.compute_loss_context_manager():
-            loss = self.compute_loss(model, inputs)
+            if return_outputs:
+                loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
+            else:
+                loss = self.compute_loss(model, inputs)
 
         del inputs
         torch.cuda.empty_cache()
@@ -2797,7 +2815,9 @@ class Trainer:
         else:
             self.accelerator.backward(loss)
 
-        return loss.detach() / self.args.gradient_accumulation_steps
+        loss_out = loss.detach() / self.args.gradient_accumulation_steps
+
+        return (loss_out, outputs) if return_outputs else loss_out
 
     def compute_loss(self, model, inputs, return_outputs=False):
         """
