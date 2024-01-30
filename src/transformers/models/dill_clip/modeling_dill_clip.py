@@ -446,8 +446,11 @@ class DillCLIPVisionModelForRegression(DeformableDetrPreTrainedModel):
 
         loss, loss_dict, auxiliary_outputs = None, None, None
         if labels is not None:
-            criterion = nn.L1Loss()
-            loss = criterion(last_hidden_state, torch.stack(labels))
+            criterion_mae = nn.L1Loss()
+            criterion_mse = nn.MSELoss()
+            loss_mae = criterion_mae(last_hidden_state, torch.stack(labels))
+            loss_mse = criterion_mse(last_hidden_state, torch.stack(labels))
+            loss = loss_mae + loss_mse
 
         if not return_dict:
             if auxiliary_outputs is not None:
