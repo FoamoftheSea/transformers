@@ -176,6 +176,17 @@ def nested_detach(tensors):
     return tensors.detach()
 
 
+def denest_and_itemize(d: dict):
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, (torch.Tensor, np.ndarray)):
+            out[k] = v.item()
+        elif isinstance(v, dict):
+            for k2, v2 in denest_and_itemize(v).items():
+                out[".".join([str(k), str(k2)])] = v2
+    return out
+
+
 def nested_xla_mesh_reduce(tensors, name):
     if is_torch_tpu_available():
         import torch_xla.core.xla_model as xm

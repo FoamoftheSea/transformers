@@ -665,6 +665,9 @@ class TrainingArguments:
         batch_eval_metrics (`Optional[bool]`):
             If set to True, evaluation will call compute_metrics at the end of each batch to accumulate statistics
             rather than saving all eval logits in memory.
+
+        log_outputs (`Optional[bool]`):
+            If set to True, trainer will log the loss_dict produced by the model.
     """
 
     framework = "pt"
@@ -1325,6 +1328,13 @@ class TrainingArguments:
         default=False,
         metadata={
             "help": "Break eval metrics calculation into batches to save memory."
+        },
+    )
+
+    log_outputs: bool = field(
+        default=False,
+        metadata={
+            "help": "Log the loss_dict produced by the model."
         },
     )
 
